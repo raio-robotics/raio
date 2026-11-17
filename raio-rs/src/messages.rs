@@ -1,11 +1,19 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{app::PortId, time::Time};
 use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterNode {
     pub node_id: usize,
-    pub endpoint: String,
+    pub endpoints: HashMap<PortId, String>,
 }
 
-pub type EndpointTable = HashMap<usize, String>;
+pub type EndpointTable = HashMap<PortId, String>;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TaggedMessage {
+    pub timestamp: Time,
+    pub ent: Time,
+    pub value: Option<Vec<u8>>,
+}

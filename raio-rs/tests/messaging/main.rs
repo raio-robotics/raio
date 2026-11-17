@@ -8,7 +8,7 @@ fn typed_value_over_the_wire() {
     Runtime::new().block_on(async {
         let mut transport = TcpTransport::new().await;
         let endpoint = transport.endpoint().to_string();
-        let (mut sender, _) = transport.connect(&endpoint).await;
+        let (mut sender, _) = TcpTransport::connect(&endpoint).await;
         let (_, mut receiver) = transport.accept().await;
 
         let serializer = SerdeSerializer;
@@ -26,7 +26,7 @@ fn mixed_types_share_one_connection_in_order() {
     Runtime::new().block_on(async {
         let mut transport = TcpTransport::new().await;
         let endpoint = transport.endpoint().to_string();
-        let (mut sender, _) = transport.connect(&endpoint).await;
+        let (mut sender, _) = TcpTransport::connect(&endpoint).await;
         let (_, mut receiver) = transport.accept().await;
 
         let serializer = SerdeSerializer;
@@ -50,7 +50,7 @@ fn close_after_last_message_yields_none() {
     Runtime::new().block_on(async {
         let mut transport = TcpTransport::new().await;
         let endpoint = transport.endpoint().to_string();
-        let (mut sender, _) = transport.connect(&endpoint).await;
+        let (mut sender, _) = TcpTransport::connect(&endpoint).await;
         let (_, mut receiver) = transport.accept().await;
 
         let serializer = SerdeSerializer;
@@ -70,7 +70,7 @@ fn large_typed_payload_with_concurrent_ends() {
     Runtime::new().block_on(async {
         let mut transport = TcpTransport::new().await;
         let endpoint = transport.endpoint().to_string();
-        let (mut sender, _) = transport.connect(&endpoint).await;
+        let (mut sender, _) = TcpTransport::connect(&endpoint).await;
         let (_, mut receiver) = transport.accept().await;
 
         let serializer = SerdeSerializer;

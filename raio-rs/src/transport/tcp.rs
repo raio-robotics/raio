@@ -34,7 +34,7 @@ impl Transport for TcpTransport {
         )
     }
 
-    async fn connect(&self, endpoint: &str) -> (TcpSender, TcpReceiver) {
+    async fn connect(endpoint: &str) -> (TcpSender, TcpReceiver) {
         let stream = TcpStream::connect(endpoint).await.unwrap();
         stream.set_nodelay(true).unwrap();
         (
@@ -98,7 +98,7 @@ mod tests {
         Runtime::new().block_on(async {
             let mut t = TcpTransport::new().await;
             let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = t.connect(&endpoint).await;
+            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
             let (_, mut receiver) = t.accept().await;
             sender.send(b"hello").await;
             sender.send(b"").await; // empty frame is a legal message
@@ -114,7 +114,7 @@ mod tests {
         Runtime::new().block_on(async {
             let mut t = TcpTransport::new().await;
             let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = t.connect(&endpoint).await;
+            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
             sender.send(b"early").await; // kernel buffers it in the backlog
             let (_, mut receiver) = t.accept().await;
             assert_eq!(receiver.recv().await.unwrap(), b"early");
@@ -126,7 +126,7 @@ mod tests {
         Runtime::new().block_on(async {
             let mut t = TcpTransport::new().await;
             let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = t.connect(&endpoint).await;
+            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
             let (_, mut receiver) = t.accept().await;
             let msg: Vec<u8> = (0..=255).collect();
             sender.send(&msg).await;
@@ -139,7 +139,7 @@ mod tests {
         Runtime::new().block_on(async {
             let mut t = TcpTransport::new().await;
             let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = t.connect(&endpoint).await;
+            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
             let (_, mut receiver) = t.accept().await;
             futures::join!(
                 async {
@@ -163,7 +163,7 @@ mod tests {
         Runtime::new().block_on(async {
             let mut t = TcpTransport::new().await;
             let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = t.connect(&endpoint).await;
+            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
             let (_, mut receiver) = t.accept().await;
             let msg: Vec<u8> = (0..4 * 1024 * 1024u32).map(|i| i as u8).collect();
             let (_, received) = futures::join!(async { sender.send(&msg).await }, async {
@@ -178,7 +178,7 @@ mod tests {
         Runtime::new().block_on(async {
             let mut t = TcpTransport::new().await;
             let endpoint = t.endpoint().to_string();
-            let (mut client, _) = t.connect(&endpoint).await;
+            let (mut client, _) = TcpTransport::connect(&endpoint).await;
             let (mut server_reply, mut server_rx) = t.accept().await;
             let (response, _) = futures::join!(async { client.call(b"ping").await }, async {
                 assert_eq!(server_rx.recv().await.unwrap(), b"ping");
@@ -193,8 +193,8 @@ mod tests {
         Runtime::new().block_on(async {
             let mut t = TcpTransport::new().await;
             let endpoint = t.endpoint().to_string();
-            let (mut s1, _) = t.connect(&endpoint).await;
-            let (mut s2, _) = t.connect(&endpoint).await;
+            let (mut s1, _) = TcpTransport::connect(&endpoint).await;
+            let (mut s2, _) = TcpTransport::connect(&endpoint).await;
             let (_, mut r1) = t.accept().await;
             let (_, mut r2) = t.accept().await;
             s1.send(b"from s1").await;

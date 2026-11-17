@@ -10,7 +10,9 @@ use std::rc::Rc;
 use std::task::Poll;
 use std::task::Waker;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct PortId {
     pub node_id: NodeId,
     pub port_id: usize,
