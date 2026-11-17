@@ -1,5 +1,6 @@
 use crate::coordinator::{Coordinator, register};
 use crate::messages::TaggedMessage;
+pub use crate::node::Node;
 use crate::node::{NodeContext, NodeId};
 pub use crate::port::{Builder, InputPort, OutputPort, PortId};
 use crate::port::{InputChannel, OutputChannel, OutputSender};
@@ -260,6 +261,8 @@ async fn run_node(
     let table =
         register::<TcpTransport, _>(&SerdeSerializer, &coordinator_endpoint, node_id, endpoints)
             .await;
+
+    context.update_start_time();
 
     let mut send_futures = Vec::new();
     for (from, to, serialize, install_sender, sender_factory) in out_edges {

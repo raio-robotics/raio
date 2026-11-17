@@ -430,6 +430,7 @@ dependencies = [
 name = "raio-rs"
 version = "0.1.0"
 dependencies = [
+ "async-io",
  "async-net",
  "bincode",
  "futures",

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, Mul, Sub};
+use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct Time(i64);
@@ -16,6 +18,10 @@ impl Time {
 
     pub fn nanos(&self) -> i64 {
         self.0
+    }
+
+    pub fn duration(&self) -> Duration {
+        Duration::from_nanos(self.0 as u64)
     }
 
     pub fn after(self, delay: Time) -> Time {

@@ -13,6 +13,7 @@ use std::task::Poll;
 use std::task::Waker;
 
 use crate::node::EventDrain;
+use crate::node::{Node, Timer};
 
 use serde::{Deserialize, Serialize};
 
@@ -229,6 +230,15 @@ impl Builder {
             id,
             channel,
             node_context: self.context.clone(),
+        }
+    }
+
+    pub fn node(&mut self) -> Node {
+        let timer = Rc::new(Timer::new());
+        self.context.register_event_source(timer.clone());
+        Node {
+            context: self.context.clone(),
+            timer,
         }
     }
 

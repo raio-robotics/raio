@@ -6,6 +6,10 @@ use crate::time::Time;
 use std::cell::Cell;
 
 pub type NodeId = usize;
+use std::task::Poll;
+
+use std::task::Waker;
+use std::time::{Duration, Instant};
 
 pub trait EventSource {
     /// Earliest Next Timestamp: the timestamp of the earliest next event that this source will produce.
@@ -23,8 +27,86 @@ pub trait EventDrain {
     fn close(&self);
 }
 
+pub struct Timer {
+    pub(crate) target: Cell<Time>,
+    pub(crate) elapsed: Cell<bool>,
+    pub(crate) wakers: RefCell<Vec<Waker>>,
+}
+
+impl Timer {
+    pub(crate) fn new() -> Self {
+        Self {
+            target: Cell::new(Time::FOREVER),
+            elapsed: Cell::new(false),
+            wakers: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn register_waker(&self, waker: Waker) {
+        self.wakers.borrow_mut().push(waker);
+    }
+}
+
+impl EventSource for Timer {
+    fn ent(&self) -> Time {
+        self.target.get()
+    }
+
+    fn ready(&self) -> bool {
+        self.elapsed.get() && self.target.get() != Time::FOREVER
+    }
+
+    fn wake_wakers(&self, time: Time) {
+        if time >= self.target.get() {
+            self.target.set(Time::FOREVER);
+            self.elapsed.set(false);
+            for waker in self.wakers.borrow_mut().drain(..) {
+                waker.wake();
+            }
+        }
+    }
+}
+
+pub struct Node {
+    pub(crate) context: Rc<NodeContext>,
+    pub(crate) timer: Rc<Timer>,
+}
+
+impl Node {
+    pub fn now(&self) -> Time {
+        self.context.now()
+    }
+
+    pub async fn wait(&self, duration: Time) -> Time {
+        assert!(duration > Time::ZERO, "wait needs a positive duration");
+        let target = self.context.now() + duration;
+        self.timer.target.set(target);
+        self.context.try_advance();
+
+        let deadline =
+            self.context.start_time.get() + self.context.now().duration() + duration.duration();
+        async_io::Timer::at(Instant::from(deadline)).await;
+        self.timer.elapsed.set(true);
+
+        std::future::poll_fn(|cx| {
+            if self.context.now() >= target {
+                return Poll::Ready(());
+            }
+            self.context.try_advance();
+            if self.context.now() >= target {
+                return Poll::Ready(());
+            }
+            self.timer.register_waker(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+        self.context.now()
+    }
+}
+
 pub struct NodeContext {
     runtime: Rc<Runtime>,
+    pub(crate) start_time: Cell<Instant>,
     event_sources: RefCell<Vec<Rc<dyn EventSource>>>,
     event_drains: RefCell<Vec<Rc<dyn EventDrain>>>,
     event_drained: Cell<bool>,
@@ -34,6 +116,7 @@ impl NodeContext {
     pub fn new(runtime: Rc<Runtime>) -> Self {
         Self {
             runtime,
+            start_time: Cell::new(Instant::now()),
             event_sources: RefCell::new(Vec::new()),
             event_drains: RefCell::new(Vec::new()),
             event_drained: Cell::new(true),
@@ -42,6 +125,10 @@ impl NodeContext {
 
     pub fn now(&self) -> Time {
         self.runtime.now()
+    }
+
+    pub fn update_start_time(&self) {
+        self.start_time.set(Instant::now());
     }
 
     /// It will process any events with timestamp <= time.
