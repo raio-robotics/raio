@@ -1,6 +1,7 @@
 pub mod app;
 pub mod coordinator;
 pub mod messages;
+pub mod node;
 pub mod port;
 pub mod runtime;
 pub mod serializer;
