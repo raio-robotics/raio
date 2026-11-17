@@ -46,6 +46,22 @@ fn sync() {
 }
 
 #[test]
+fn join() {
+    let stdout = run_example("join");
+    assert_eq!(
+        stdout,
+        "produce 0 at 700ms\n\
+         consume 0 at 1s\n\
+         produce 1 at 1400ms\n\
+         consume 1 at 2s\n\
+         produce 2 at 2100ms\n\
+         produce 3 at 2800ms\n\
+         consume 2 at 3s\n\
+         consume 3 at 4s\n"
+    );
+}
+
+#[test]
 fn select() {
     let stdout = run_example("select");
     assert_eq!(

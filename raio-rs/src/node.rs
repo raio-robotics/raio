@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::runtime::Runtime;
 use crate::time::Time;
@@ -28,40 +28,67 @@ pub trait EventDrain {
 }
 
 pub struct Timer {
-    pub(crate) target: Cell<Time>,
+    entries: RefCell<Vec<Weak<TimerEntry>>>,
+}
+
+pub(crate) struct TimerEntry {
+    target: Time,
     pub(crate) elapsed: Cell<bool>,
-    pub(crate) wakers: RefCell<Vec<Waker>>,
+    waker: RefCell<Option<Waker>>,
 }
 
 impl Timer {
     pub(crate) fn new() -> Self {
         Self {
-            target: Cell::new(Time::FOREVER),
-            elapsed: Cell::new(false),
-            wakers: RefCell::new(Vec::new()),
+            entries: RefCell::new(Vec::new()),
         }
     }
 
-    fn register_waker(&self, waker: Waker) {
-        self.wakers.borrow_mut().push(waker);
+    pub(crate) fn arm(&self, target: Time) -> Rc<TimerEntry> {
+        let entry = Rc::new(TimerEntry {
+            target,
+            elapsed: Cell::new(false),
+            waker: RefCell::new(None),
+        });
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|entry| entry.strong_count() > 0);
+        entries.push(Rc::downgrade(&entry));
+        entry
+    }
+
+    fn live(&self) -> Vec<Rc<TimerEntry>> {
+        self.entries
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect()
     }
 }
 
 impl EventSource for Timer {
     fn ent(&self) -> Time {
-        self.target.get()
+        self.live()
+            .iter()
+            .map(|entry| entry.target)
+            .min()
+            .unwrap_or(Time::FOREVER)
     }
 
     fn ready(&self) -> bool {
-        self.elapsed.get() && self.target.get() != Time::FOREVER
+        let live = self.live();
+        let Some(min) = live.iter().map(|entry| entry.target).min() else {
+            return false;
+        };
+        live.iter()
+            .any(|entry| entry.target == min && entry.elapsed.get())
     }
 
     fn wake_wakers(&self, time: Time) {
-        if time >= self.target.get() {
-            self.target.set(Time::FOREVER);
-            self.elapsed.set(false);
-            for waker in self.wakers.borrow_mut().drain(..) {
-                waker.wake();
+        for entry in self.live() {
+            if time >= entry.target {
+                if let Some(waker) = entry.waker.borrow_mut().take() {
+                    waker.wake();
+                }
             }
         }
     }
@@ -80,13 +107,12 @@ impl Node {
     pub async fn wait(&self, duration: Time) -> Time {
         assert!(duration > Time::ZERO, "wait needs a positive duration");
         let target = self.context.now() + duration;
-        self.timer.target.set(target);
+        let entry = self.timer.arm(target);
         self.context.try_advance();
 
-        let deadline =
-            self.context.start_time.get() + self.context.now().duration() + duration.duration();
-        async_io::Timer::at(Instant::from(deadline)).await;
-        self.timer.elapsed.set(true);
+        let deadline = self.context.start_time.get() + target.duration();
+        async_io::Timer::at(deadline).await;
+        entry.elapsed.set(true);
 
         std::future::poll_fn(|cx| {
             if self.context.now() >= target {
@@ -96,7 +122,7 @@ impl Node {
             if self.context.now() >= target {
                 return Poll::Ready(());
             }
-            self.timer.register_waker(cx.waker().clone());
+            *entry.waker.borrow_mut() = Some(cx.waker().clone());
             Poll::Pending
         })
         .await;
@@ -324,6 +350,52 @@ mod tests {
         ctx.register_event_drain(drain.clone());
         ctx.close_event_drains();
         assert!(drain.closed.get());
+    }
+
+    #[test]
+    fn unconsumed_timer_blocks_further_advances() {
+        let ctx = NodeContext::new(Rc::new(Runtime::new()));
+        let timer = Rc::new(Timer::new());
+        let armed = timer.arm(700 * MS);
+        armed.elapsed.set(true);
+        ctx.register_event_source(timer.clone());
+        ctx.register_event_source(FixedSource::new(1 * S, true));
+        ctx.register_event_source(FixedSource::new(2 * S, false));
+
+        ctx.try_advance();
+        assert_eq!(ctx.now(), 700 * MS);
+
+        ctx.try_advance();
+        assert_eq!(ctx.now(), 700 * MS); // held until the sleeper consumes
+
+        drop(armed);
+        ctx.try_advance();
+        assert_eq!(ctx.now(), 1 * S);
+    }
+
+    #[test]
+    fn concurrent_waits_deliver_in_tag_order() {
+        let ctx = NodeContext::new(Rc::new(Runtime::new()));
+        let timer = Rc::new(Timer::new());
+        let first = timer.arm(700 * MS);
+        let second = timer.arm(1 * S);
+        first.elapsed.set(true);
+        second.elapsed.set(true);
+        ctx.register_event_source(timer.clone());
+        ctx.register_event_source(FixedSource::new(2 * S, false));
+
+        ctx.try_advance();
+        assert_eq!(ctx.now(), 700 * MS);
+        ctx.try_advance();
+        assert_eq!(ctx.now(), 700 * MS); // first still unconsumed
+
+        drop(first);
+        ctx.try_advance();
+        assert_eq!(ctx.now(), 1 * S);
+
+        drop(second);
+        ctx.try_advance();
+        assert_eq!(ctx.now(), 1 * S); // nothing left to deliver
     }
 
     #[test]
