@@ -1,0 +1,9 @@
+docs:
+  label: Docs
+  permalink: /docs
+  description: Raio documentation
+
+blog:
+  label: Blog
+  permalink: /blogs
+  description: Raio's blog

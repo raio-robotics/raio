@@ -2,6 +2,7 @@ target/
 
 # Diagrams
 **/*.svg
+!docs/**/*.svg
 
 # Benchmark
 benchmark/results/
@@ -13,3 +14,6 @@ python/python/raio/_rs/
 
 ## AI
 .claude/
+
+# macOS
+.DS_Store
