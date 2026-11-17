@@ -22,7 +22,7 @@ impl Ticker {
             self.node.wait(1 * MS).await;
             self.out.set(count);
             if count == 3 {
-                // Every node of the app shuts down at one tag.
+                // Every node of the app shuts down at one timestamp.
                 self.node.request_shutdown();
             }
             count += 1;

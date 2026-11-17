@@ -1,8 +1,5 @@
-use raio::app::{
-    Assignment, Builder, Connection, Graph, InputPort, Node, OutputPort, PortId, create_node,
-    run_node_as,
-};
-use raio::coordinator::spawn;
+use raio::app::{Assignment, Builder, InputPort, Node, OutputPort, create_node, run_node_as};
+use raio::coordinator::{Connection, Graph, PortId, spawn};
 use raio::reaction;
 use raio::tasks;
 use raio::time::{MS, Time};
@@ -28,7 +25,7 @@ struct Order {
     node: Node,
     a: InputPort<i64>,
     b: InputPort<i64>,
-    /// The tag and the name of each reaction that ran.
+    /// The timestamp and the name of each reaction that ran.
     ran: Rc<RefCell<Vec<(Time, &'static str)>>>,
 }
 
@@ -54,7 +51,8 @@ impl Order {
 
 #[test]
 fn reactions_keep_their_order_when_only_some_ports_have_a_value() {
-    // A ticker of 1ms feeds `a` and a ticker of 2ms feeds `b`, so every other tag has only `a`.
+    // A ticker of 1ms feeds `a` and a ticker of 2ms feeds `b`, so every other timestamp has
+    // only `a`.
     let connect = |ticker, input| Connection {
         from: PortId {
             node_id: ticker,

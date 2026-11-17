@@ -2,47 +2,18 @@ import threading
 
 import pytest
 import raio
+from nodes import Printer, Ticker, lines
 from raio import MS, Closed, InputPort, Node, OutputPort, Time, task
 
 
-class Ticker(Node):
-    out = OutputPort[int]()
-
-    def __init__(self, period: Time, ticks: int):
-        self.period, self.ticks = period, ticks
-
-    @task
-    async def tick(self):
-        for i in range(self.ticks):
-            await raio.sleep(self.period)
-            self.out.set(i)
-
-
-class Printer(Node):
-    inp = InputPort[int]()
-
-    def __init__(self, name: str = "printer"):
-        self.name = name
-
-    @task
-    async def show(self):
-        async for value in self.inp:
-            print(f"{self.name} got {value} at {raio.now()}")
-
-
-def lines(capfd):
-    """Return the sorted output of the nodes, which print from their own processes."""
-    return sorted(capfd.readouterr().out.splitlines())
-
-
-def test_values_reach_another_process_at_their_tags(capfd):
+def test_values_reach_another_process_at_their_timestamps(capfd):
     ticker, printer = Ticker(1 * MS, 3), Printer()
     raio.connect(ticker.out, printer.inp)
     raio.run(ticker, printer)
     assert lines(capfd) == [f"printer got {i} at {i + 1}ms" for i in range(3)]
 
 
-def test_a_delay_shifts_the_tags_of_a_connection(capfd):
+def test_a_delay_shifts_the_timestamps_of_a_connection(capfd):
     ticker, printer = Ticker(1 * MS, 2), Printer()
     raio.connect(ticker.out, printer.inp, delay=10 * MS)
     raio.run(ticker, printer)
@@ -73,7 +44,7 @@ class Reader(Node):
         first = await self.inp
         print(f"first {first}, value {self.inp.value}, time {self.inp.time}")
         print(f"present {self.inp.present}, closed {self.inp.closed}")
-        await raio.sleep(500 * raio.US)
+        await raio.wait(500 * raio.US)
         print(f"later: value {self.inp.value}, present {self.inp.present}")
         print(f"second {await self.inp} at {raio.now()}")
         try:
@@ -116,13 +87,13 @@ def test_tasks_run_in_the_order_they_are_declared(capfd):
         @task
         async def zebra(self):
             print("zebra starts")
-            await raio.sleep(1 * MS)
+            await raio.wait(1 * MS)
             print("zebra resumes")
 
         @task
         async def apple(self):
             print("apple starts")
-            await raio.sleep(1 * MS)
+            await raio.wait(1 * MS)
             print("apple resumes")
 
     raio.run(Pair())
@@ -134,7 +105,7 @@ def test_an_error_in_a_task_fails_the_app(capfd):
     class Faulty(Node):
         @task
         async def fail(self):
-            await raio.sleep(1 * MS)
+            await raio.wait(1 * MS)
             raise ValueError("broken")
 
     with pytest.raises(RuntimeError, match=r"node 0 \(Faulty\) exited with status 1"):
@@ -142,7 +113,7 @@ def test_an_error_in_a_task_fails_the_app(capfd):
     assert "ValueError: broken" in capfd.readouterr().err
 
 
-def test_an_output_cannot_be_set_at_the_start_tag(capfd):
+def test_an_output_cannot_be_set_at_the_start_timestamp(capfd):
     class Eager(Node):
         out = OutputPort[int]()
 
@@ -152,7 +123,7 @@ def test_an_output_cannot_be_set_at_the_start_tag(capfd):
 
     with pytest.raises(RuntimeError, match="exited with status 1"):
         raio.run(Eager())
-    assert "tag 0 completes at startup, so wait first" in capfd.readouterr().err
+    assert "timestamp 0 completes at startup, so wait first" in capfd.readouterr().err
 
 
 def test_an_input_without_a_connection_is_refused(capfd):
@@ -215,7 +186,7 @@ def test_a_node_that_cannot_be_rebuilt_in_its_process_fails_the_app(capfd):
         def __reduce__(self):
             return _fail_to_load, ()
 
-    # The healthy node waits unwired, so the node that failed is the one reported.
+    # The healthy node is told that the app does not start, and ends without a word.
     with pytest.raises(RuntimeError, match=r"node 1 \(Unloadable\) exited with status 1"):
         raio.run(Ticker(1 * MS, 1_000_000), Unloadable())
     errors = capfd.readouterr().err

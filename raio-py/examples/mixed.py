@@ -9,7 +9,7 @@ class Thermometer(Node):
     @task
     async def measure(self):
         for value in (20.5, 21.0):
-            await raio.sleep(1 * MS)
+            await raio.wait(1 * MS)
             self.out.set({"name": "celsius", "value": value})
 
 

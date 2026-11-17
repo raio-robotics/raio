@@ -25,7 +25,7 @@ def test_a_time_scales_by_a_float_and_divides():
         S / Time.ZERO
 
 
-def test_a_microstep_orders_tags_within_one_nanosecond():
+def test_a_microstep_orders_timestamps_within_one_nanosecond():
     assert Time(5) < Time(5, 1) < Time(5, 2) < Time(6)
     assert Time(5, 2).microstep == 2
 

@@ -3,7 +3,7 @@ import threading
 import pytest
 import raio
 from raio import MS, Action, Node, reaction, task
-from test_app import Ticker
+from nodes import Ticker
 
 
 class Feeder(Node):
@@ -27,7 +27,7 @@ class Feeder(Node):
 def test_values_sent_from_a_thread_arrive_in_order_as_physical_events(capfd):
     raio.run(Feeder())
     assert capfd.readouterr().out.splitlines() == [
-        "0 True True",  # Each value has a physical tag after the one before it.
+        "0 True True",  # Each value has a physical timestamp after the one before it.
         "1 True True",
         "2 True True",
         "closed True",
@@ -39,7 +39,7 @@ class Waker(Node):
 
     @task
     async def main(self):
-        await raio.sleep(1 * MS)
+        await raio.wait(1 * MS)
         self.wake.send("first")
         self.wake.send("second")
         print(await self.wake, await self.wake, raio.is_physical(), raio.now() > 1 * MS)
@@ -83,7 +83,5 @@ def test_an_action_triggers_a_reaction(capfd):
 
 
 def test_an_action_takes_no_connection():
-    ticker, waker = Ticker(1 * MS, 1), Waker()
-    raio.connect(ticker.out, waker.wake)
-    with pytest.raises(ValueError, match="node 1 has no input port 0"):
-        raio.run(ticker, waker)
+    with pytest.raises(ValueError, match="connect needs an input port of a node instance"):
+        raio.connect(Ticker(1 * MS, 1).out, Waker().wake)

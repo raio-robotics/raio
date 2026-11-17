@@ -6,20 +6,31 @@ import argparse
 import pickle
 import signal
 import sys
+from typing import Callable, NamedTuple
 
 import cloudpickle
 
 from .._rs import core
-from .node import _kinds, _start
+from .node import _start
 from .utils import buffer_output_by_line
 
 
-def _load(code):
-    """Rebuild the node from its code; return what raio-rs needs to build it and start it."""
+class _Loaded(NamedTuple):
+    """Everything that raio-rs needs to build a node and run it."""
+
+    kinds: list[str]  # the kind of each port, in the order of their positions
+    serializers: list[tuple]  # (port position, name, serializer) for each connection's choice
+    start: Callable[[], list]  # returns the coroutines of the node's tasks
+    shutdown: Callable[[], None]
+
+
+def _load(code) -> _Loaded:
+    """Rebuild the node from the code that the launcher left with the coordinator."""
     path, payload = pickle.loads(code)
     sys.path[:] = path  # The node's classes are imported from where the launcher found them.
     node, serializers = cloudpickle.loads(payload)
-    return _kinds(node), serializers, lambda: _start(node), node.shutdown
+    kinds = [port._kind for port in node._ports]
+    return _Loaded(kinds, serializers, lambda: _start(node), node.shutdown)
 
 
 def main():

@@ -1,3 +1,5 @@
+//! `Time` as Python has it.
+
 use pyo3::exceptions::{PyOverflowError, PyZeroDivisionError};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
@@ -16,14 +18,14 @@ use raio::time::{HOUR, MINUTE, MS, NS, S, SECOND, Time, US};
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PyTime(pub(crate) Time);
 
-/// What a time can be multiplied by.
+/// A number that a time can be multiplied by.
 #[derive(FromPyObject)]
 enum Factor {
     Int(i64),
     Float(f64),
 }
 
-/// What a time can be divided by.
+/// A time or a number that a time can be divided by.
 #[derive(FromPyObject)]
 enum Divisor {
     Time(Py<PyTime>),
@@ -93,7 +95,7 @@ impl PyTime {
         self.0.nanos()
     }
 
-    /// The position among the tags that share these nanoseconds.
+    /// The position among the timestamps that share these nanoseconds.
     #[getter]
     fn microstep(&self) -> u32 {
         self.0.microstep()
@@ -159,7 +161,6 @@ impl PyTime {
     }
 }
 
-/// Add this module's classes and constants to the Python module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTime>()?;
     let units = [

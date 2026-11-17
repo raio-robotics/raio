@@ -10,7 +10,7 @@ class Ticker(Node):
         # The ticker runs until the user presses ^C.
         count = 0
         while True:
-            await raio.sleep(100 * MS)
+            await raio.wait(100 * MS)
             self.out.set(count)
             count += 1
 

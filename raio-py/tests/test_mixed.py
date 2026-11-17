@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import raio
 from raio import MS, Node, OutputPort, RustNode, task
-from test_app import Printer, lines
+from nodes import Printer, lines
 
 sys.path.append(str(Path(__file__).parent.parent / "examples"))
 from scale import Scale  # noqa: E402  The Python interface of raio-rs's `scale` example.
@@ -19,7 +19,7 @@ class Source(Node):
     @task
     async def send(self):
         for value in self.values:
-            await raio.sleep(1 * MS)
+            await raio.wait(1 * MS)
             self.out.set(value)
 
 

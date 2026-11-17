@@ -1,3 +1,5 @@
+//! Creating one node, and running it in the process that a launcher assigned to it.
+
 use std::cell::RefCell;
 use std::future::Future;
 use std::ops::Deref;
@@ -23,6 +25,7 @@ impl Runner {
     }
 }
 
+/// Starts one task of a node: it takes the node and returns the task's future.
 pub type Start<N> = Box<dyn FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>>>;
 
 /// A node's place in an app, as its launcher assigned it.
@@ -95,7 +98,7 @@ impl<N: 'static> CreatedNode<N> {
     pub(super) fn new(
         node_id: NodeId,
         constructor: impl FnOnce(&mut Builder) -> N,
-        starts: Vec<Start<N>>,
+        tasks: Vec<Start<N>>,
     ) -> Self {
         let runtime = Rc::new(Runtime::new());
         let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
@@ -104,16 +107,15 @@ impl<N: 'static> CreatedNode<N> {
         let (running, handle) = (node.clone(), scheduler.clone());
         // Wire the node through the coordinator and run it until it finishes.
         let run = move |link: Link| {
-            for task in builder.tasks {
+            for task in builder.internal_tasks {
                 runtime.spawn_internal(task);
             }
-            let frame_transfer = runtime.block_on(connect_node(
-                scheduler.clone(),
-                link,
-                builder.inputs,
-                builder.outputs,
-            ));
-            let tasks = starts
+            let connected = connect_node(scheduler.clone(), link, builder.inputs, builder.outputs);
+            // A node of an app that does not start has nothing to run.
+            let Some(frame_transfer) = runtime.block_on(connected) else {
+                return;
+            };
+            let tasks = tasks
                 .into_iter()
                 .map(|start| start(running.clone()))
                 .collect();
@@ -126,8 +128,8 @@ impl<N: 'static> CreatedNode<N> {
         }
     }
 
-    /// Run this function once when the node shuts down: at the tag at which the app shuts
-    /// down, where nothing else runs, or at the node's last tag when it finishes on its own.
+    /// Run this function once when the node shuts down: at the timestamp at which the app shuts
+    /// down, where nothing else runs, or at the node's last timestamp when it finishes on its own.
     pub fn on_shutdown(self, shutdown: impl FnOnce(&N) + 'static) -> Self {
         let node = self.node.clone();
         *self.scheduler.shutdown_function.borrow_mut() = Some(Box::new(move || shutdown(&node)));
@@ -138,10 +140,10 @@ impl<N: 'static> CreatedNode<N> {
 /// Build the node that this program runs; set its ports before `run_node`.
 pub fn create_node<N: 'static>(
     constructor: impl FnOnce(&mut Builder) -> N,
-    starts: Vec<Start<N>>,
+    tasks: Vec<Start<N>>,
 ) -> CreatedNode<N> {
     // The node's id comes with its assignment; its ports do not use it.
-    CreatedNode::new(0, constructor, starts)
+    CreatedNode::new(0, constructor, tasks)
 }
 
 /// Run the node as this program's launcher assigned it, until it finishes.
@@ -160,7 +162,8 @@ pub fn run_node<N: 'static>(node: CreatedNode<N>) {
 
 /// Run the node under a given assignment, for nodes that share a process.
 pub fn run_node_as<N: 'static>(assignment: Assignment, node: CreatedNode<N>) {
-    run_node_on(Link::open(assignment), node);
+    let link = Link::open(assignment.node_id, &assignment.coordinator_endpoint);
+    run_node_on(link, node);
 }
 
 /// Run the node on a link that is already open, for a node built from the code the link brought.
@@ -185,14 +188,22 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::app::{Connection, Graph, InputPort, Node, OutputPort, PortId};
-    use crate::coordinator::spawn;
+    use crate::app::{InputPort, Node, OutputPort};
+    use crate::coordinator::{Connection, Failure, Graph, PortId, spawn};
+    use crate::coordinator::{SERIALIZER, TRANSPORT};
+    use crate::messages::{Code, NodeMessage, Reply, Wiring};
+    use crate::serializer::Serializer;
     use crate::serializer::tests::Decimal;
-    use crate::time::{MS, Time};
+    use crate::time::{HOUR, MS, Time};
     use crate::transport::tests::Loopback;
+    use crate::transport::{Listener, Receiver, Sender, Transport};
 
-    #[test]
-    fn a_connection_uses_the_serializer_and_transport_its_ports_were_set_to() {
+    /// Start a coordinator for a source, node 0, that feeds a sink, node 1; return what assigns
+    /// each node its place, and the coordinator's thread.
+    fn pair() -> (
+        impl Fn(NodeId) -> Assignment,
+        std::thread::JoinHandle<Result<(), Failure>>,
+    ) {
         let port = |node_id| PortId {
             node_id,
             port_id: 0,
@@ -206,10 +217,16 @@ mod tests {
             }],
         };
         let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());
-        let assign = |node_id| Assignment {
+        let assign = move |node_id| Assignment {
             node_id,
             coordinator_endpoint: coordinator_endpoint.clone(),
         };
+        (assign, coordinator)
+    }
+
+    #[test]
+    fn a_connection_uses_the_serializer_and_transport_its_ports_were_set_to() {
+        let (assign, coordinator) = pair();
 
         let assignment = assign(0);
         let source = std::thread::spawn(move || {
@@ -243,24 +260,8 @@ mod tests {
     }
 
     #[test]
-    fn every_node_shuts_down_at_one_tag_and_gets_what_was_sent_before_it() {
-        let port = |node_id| PortId {
-            node_id,
-            port_id: 0,
-        };
-        let graph = Graph {
-            nodes: 2,
-            connections: vec![Connection {
-                from: port(0),
-                to: port(1),
-                delay: Time::ZERO,
-            }],
-        };
-        let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());
-        let assign = |node_id| Assignment {
-            node_id,
-            coordinator_endpoint: coordinator_endpoint.clone(),
-        };
+    fn every_node_shuts_down_at_one_timestamp_and_gets_what_was_sent_before_it() {
+        let (assign, coordinator) = pair();
 
         let assignment = assign(0);
         let source = std::thread::spawn(move || {
@@ -288,8 +289,8 @@ mod tests {
             let seen = received.clone();
             let start: Start<(Node, InputPort<i64>)> = Box::new(move |sink| {
                 Box::pin(async move {
-                    while let Some((value, tag)) = sink.1.wait().await {
-                        seen.borrow_mut().push(tag);
+                    while let Some((value, timestamp)) = sink.1.wait().await {
+                        seen.borrow_mut().push(timestamp);
                         if *value == 2 {
                             sink.0.request_shutdown_after(2 * MS);
                         }
@@ -307,14 +308,78 @@ mod tests {
         let shutdown = source.join().unwrap().expect("the source shut down");
         let (received, sink_shutdown) = sink.join().unwrap();
         assert_eq!(sink_shutdown, Some(shutdown));
-        // The sink got every tick before the shutdown tag, and none at or after it.
+        // The sink got every tick before the shutdown timestamp, and none at or after it.
         let ticks: Vec<Time> = (1..)
             .map(|count| count * MS)
             .take_while(|tick| *tick < shutdown)
             .collect();
         assert_eq!(received, ticks);
-        // The sink asked at 3ms for a shutdown 2ms after the latest node's tag.
+        // The sink asked at 3ms for a shutdown 2ms after the latest node's timestamp.
         assert!(shutdown >= 5 * MS, "{shutdown}");
+    }
+
+    /// Start a coordinator of one node that answers the node's registration with `reply`,
+    /// returns the node's next message if it wired the node, and goes away.
+    fn lone_coordinator(
+        reply: Reply,
+    ) -> (Assignment, std::thread::JoinHandle<Option<NodeMessage>>) {
+        let (announce, announced) = std::sync::mpsc::channel();
+        let coordinator = std::thread::spawn(move || {
+            Runtime::new().block_on(async move {
+                let mut listener = TRANSPORT.bind().await;
+                announce.send(listener.endpoint().to_string()).unwrap();
+                let (mut replier, mut receiver) = listener.accept().await;
+                receiver.recv().await.unwrap();
+                let code: Code = None;
+                replier.send(&SERIALIZER.serialize(&code)).await;
+                receiver.recv().await.unwrap();
+                replier.send(&SERIALIZER.serialize(&reply)).await;
+                match reply {
+                    Reply::Wired(_) => receiver.recv().await,
+                    _ => None,
+                }
+                .map(|bytes| SERIALIZER.deserialize(&bytes))
+            })
+        });
+        let assignment = Assignment {
+            node_id: 0,
+            coordinator_endpoint: announced.recv().unwrap(),
+        };
+        (assignment, coordinator)
+    }
+
+    /// Create a node whose task outlasts the test, and the flags that its task and its
+    /// shutdown function set.
+    fn waiting_node() -> (CreatedNode<Node>, [Rc<std::cell::Cell<bool>>; 2]) {
+        let flags = [(); 2].map(|_| Rc::new(std::cell::Cell::new(false)));
+        let [started, shut_down] = flags.clone();
+        let start: Start<Node> = Box::new(move |node| {
+            Box::pin(async move {
+                started.set(true);
+                node.wait(HOUR).await;
+            })
+        });
+        let node = create_node(|builder| builder.node(), vec![start])
+            .on_shutdown(move |_| shut_down.set(true));
+        (node, flags)
+    }
+
+    #[test]
+    fn a_node_sends_its_heartbeat_and_shuts_down_once_its_coordinator_is_gone() {
+        let (assignment, coordinator) = lone_coordinator(Reply::Wired(Wiring::default()));
+        let (node, [started, shut_down]) = waiting_node();
+        run_node_as(assignment, node);
+        assert_eq!(coordinator.join().unwrap(), Some(NodeMessage::Heartbeat));
+        assert!(started.get() && shut_down.get());
+    }
+
+    #[test]
+    fn a_node_of_an_app_that_does_not_start_runs_nothing() {
+        let (assignment, coordinator) = lone_coordinator(Reply::Cancelled);
+        let (node, [started, shut_down]) = waiting_node();
+        run_node_as(assignment, node);
+        coordinator.join().unwrap();
+        assert!(!started.get() && !shut_down.get());
     }
 
     #[test]

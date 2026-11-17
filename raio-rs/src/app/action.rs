@@ -1,16 +1,27 @@
 use std::cell::{Ref, RefCell};
 use std::future::Future;
-use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::{Arc, Weak};
 
 use futures::channel::mpsc::UnboundedSender;
 
-use crate::app::InputPort;
+use super::port::InputChannel;
+use super::reaction::Trigger;
+use crate::node::NodeScheduler;
 use crate::time::Time;
 
-/// Receives values from other threads as physical events.
+/// Receives values from other threads as physical events. Tasks read an action as they read
+/// an input port, but it takes no connection:
+///
+/// ```compile_fail
+/// let mut app = raio::app::App::new();
+/// let out = app.create_node(|builder| builder.output::<i64>(), Vec::new());
+/// let action = app.create_node(|builder| builder.action::<i64>(), Vec::new());
+/// app.connect(&out, &action);
+/// ```
 pub struct Action<T> {
-    pub(crate) port: InputPort<T>,
+    pub(crate) channel: Rc<InputChannel<T>>,
+    pub(crate) scheduler: Rc<NodeScheduler>,
     pub(crate) handles: RefCell<Handles<T>>,
 }
 
@@ -34,37 +45,35 @@ impl<T> Action<T> {
         ActionHandle { sender }
     }
 
-    /// The input at which the action's values arrive.
-    pub fn port(&self) -> &InputPort<T> {
-        &self.port
-    }
-
+    /// The value delivered at the current timestamp, if any.
     pub fn get(&self) -> Option<Ref<'_, T>> {
-        self.port.get()
+        self.channel.get(self.scheduler.now())
     }
 
+    /// The latest value delivered, and its timestamp.
     pub fn latest(&self) -> Option<(Ref<'_, T>, Time)> {
-        self.port.latest()
+        self.channel.latest()
     }
 
+    /// True once the action has closed and delivered every value.
     pub fn closed(&self) -> bool {
-        self.port.closed()
+        self.channel.drained()
     }
 
-    pub fn wait(&self) -> impl Future<Output = Option<(Ref<'_, T>, Time)>> {
-        self.port.wait()
+    /// Wait for a value after this call's timestamp; return `None` when the action closes and
+    /// drains.
+    pub fn wait(&self) -> impl Future<Output = Option<(Ref<'_, T>, Time)>> + Unpin {
+        self.channel.wait(self.scheduler.now())
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn pin(&self) -> Pin<Box<impl Future<Output = Option<(Ref<'_, T>, Time)>>>> {
-        self.port.pin()
-    }
-
-    pub fn trigger(&self) -> Pin<Box<dyn Future<Output = bool> + '_>> {
-        self.port.trigger()
+    /// Wait as `wait` does, for a reaction: true for a value, false once the action has closed.
+    pub fn trigger(&self) -> Trigger<'_> {
+        let wait = self.wait();
+        Box::pin(async move { wait.await.is_some() })
     }
 }
 
+/// Sends values to an action from any thread.
 pub struct ActionHandle<T> {
     sender: Arc<UnboundedSender<T>>,
 }
@@ -78,7 +87,7 @@ impl<T> Clone for ActionHandle<T> {
 }
 
 impl<T> ActionHandle<T> {
-    /// Send a value; the receiving node assigns its physical tag.
+    /// Send a value; the receiving node assigns its physical timestamp.
     pub fn send(&self, value: T) {
         if self.sender.unbounded_send(value).is_err() {
             panic!("the action's node has stopped");
@@ -90,9 +99,7 @@ impl<T> ActionHandle<T> {
 mod tests {
     use super::*;
     use crate::app::Builder;
-    use crate::node::NodeScheduler;
     use crate::runtime::Runtime;
-    use std::rc::Rc;
 
     fn rig() -> (Rc<Runtime>, Rc<NodeScheduler>, Builder) {
         let runtime = Rc::new(Runtime::new());
@@ -105,7 +112,7 @@ mod tests {
     fn values_arrive_physically_in_send_order_until_the_last_handle_drops() {
         let (runtime, scheduler, mut builder) = rig();
         let action = Rc::new(builder.action::<i64>());
-        for task in std::mem::take(&mut builder.tasks) {
+        for task in std::mem::take(&mut builder.internal_tasks) {
             runtime.spawn_internal(task);
         }
         // Actions produce no logical events, so they do not limit ENT.
@@ -123,9 +130,9 @@ mod tests {
         let seen = Rc::new(RefCell::new(Vec::new()));
         let (out, task_scheduler, task_action) = (seen.clone(), scheduler.clone(), action.clone());
         scheduler.run_user(async move {
-            while let Some((value, tag)) = task_action.wait().await {
+            while let Some((value, timestamp)) = task_action.wait().await {
                 out.borrow_mut()
-                    .push((*value, tag, task_scheduler.is_physical()));
+                    .push((*value, timestamp, task_scheduler.is_physical()));
                 assert_eq!(task_scheduler.ent(), Time::FOREVER);
             }
         });
@@ -136,8 +143,15 @@ mod tests {
         assert_eq!(values, vec![1, 2, 3]);
         assert!(seen.iter().all(|(_, _, physical)| *physical));
         assert!(seen[0].1 > Time::ZERO);
-        // Each value receives a strictly increasing tag.
+        // Each value receives a strictly increasing timestamp.
         assert!(seen.windows(2).all(|pair| pair[0].1 < pair[1].1));
+    }
+
+    #[test]
+    fn an_action_takes_a_position_among_the_ports_of_its_node() {
+        let (_runtime, _scheduler, mut builder) = rig();
+        let _action = builder.action::<i64>();
+        assert_eq!(builder.input::<i64>().setting.id.port_id, 1);
     }
 
     #[test]

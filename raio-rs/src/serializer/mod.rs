@@ -1,3 +1,5 @@
+//! Converting port values to and from bytes.
+
 pub mod bincode;
 pub mod msgpack;
 
@@ -8,6 +10,7 @@ use serde::de::DeserializeOwned;
 
 use bincode::BincodeSerializer;
 
+/// Converts the values of a port to and from the bytes that a connection carries.
 pub trait Serializer<T> {
     /// The name by which a connection selects this serializer.
     fn name(&self) -> &str {

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::port::PortId;
+use crate::coordinator::PortId;
 use crate::messages::OutputInfo;
 use crate::serializer::{Payload, Serializer};
 use crate::transport::AnyTransport;
@@ -55,32 +55,19 @@ pub(crate) struct PortSetting<T> {
 impl<T: Payload> PortSetting<T> {
     /// Create the setting of a port that uses its payload's default serializer over TCP.
     pub(crate) fn new(id: PortId) -> Self {
-        let setting = Self {
-            id,
-            ..Self::local()
-        };
         let serializer = T::default_serializer();
         let tcp: Rc<dyn AnyTransport> = Rc::new(TcpTransport);
-        let name = serializer.name().to_string();
-        setting.serializers.set(name, serializer);
-        setting.transports.set(tcp.name().to_string(), tcp);
-        setting
+        let serializers = vec![(serializer.name().to_string(), serializer)];
+        let transports = vec![(tcp.name().to_string(), tcp)];
+        Self {
+            id,
+            serializers: PortOptions(RefCell::new(serializers)),
+            transports: PortOptions(RefCell::new(transports)),
+        }
     }
 }
 
 impl<T> PortSetting<T> {
-    /// Create the setting of a channel that never connects to another node.
-    pub(crate) fn local() -> Self {
-        Self {
-            id: PortId {
-                node_id: 0,
-                port_id: 0,
-            },
-            serializers: PortOptions(RefCell::new(Vec::new())),
-            transports: PortOptions(RefCell::new(Vec::new())),
-        }
-    }
-
     /// Describe an output: its position and every serializer and transport it has.
     pub(crate) fn describe(&self) -> OutputInfo {
         OutputInfo {
@@ -96,12 +83,16 @@ mod tests {
     use super::*;
     use crate::serializer::tests::Decimal;
 
-    #[test]
-    fn an_option_is_found_by_its_name_and_added_once() {
-        let setting = PortSetting::<i64>::new(PortId {
+    fn setting() -> PortSetting<i64> {
+        PortSetting::new(PortId {
             node_id: 0,
             port_id: 0,
-        });
+        })
+    }
+
+    #[test]
+    fn an_option_is_found_by_its_name_and_added_once() {
+        let setting = setting();
         let decimal = Serializer::<i64>::name(&Decimal).to_string();
         setting.serializers.add(decimal.clone(), Rc::new(Decimal));
         setting.serializers.add(decimal.clone(), Rc::new(Decimal));
@@ -116,7 +107,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "the port has nothing named \"pickle\"")]
     fn an_option_the_port_lacks_is_a_wiring_bug() {
-        let setting = PortSetting::<i64>::local();
-        setting.serializers.get("pickle");
+        setting().serializers.get("pickle");
     }
 }

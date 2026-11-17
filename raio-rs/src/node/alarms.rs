@@ -5,7 +5,7 @@ use std::task::Waker;
 use super::EventSource;
 use crate::time::Time;
 
-/// Pending waits that wake when the node reaches their target tags.
+/// Pending waits that wake when the node reaches their target timestamps.
 pub(super) struct Alarms {
     entries: RefCell<Vec<Weak<Alarm>>>, // Weak references let dropping an alarm cancel its wait.
 }
@@ -13,7 +13,7 @@ pub(super) struct Alarms {
 /// A pending wait, cancelled when its owning future drops the alarm.
 pub(super) struct Alarm {
     target: Time,
-    physical: bool, // The wait inherits the tag's physical origin.
+    physical: bool, // The wait inherits the timestamp's physical origin.
     pub(super) waker: RefCell<Option<Waker>>,
 }
 
@@ -55,7 +55,7 @@ impl EventSource for Alarms {
             .unwrap_or(Time::FOREVER)
     }
 
-    fn next_event_tag(&self) -> Option<Time> {
+    fn next_event_timestamp(&self) -> Option<Time> {
         self.earliest(|_| true)
     }
 
@@ -89,27 +89,28 @@ mod tests {
     }
 
     #[test]
-    fn an_alarm_wakes_its_task_at_its_own_tag() {
+    fn an_alarm_wakes_its_task_at_its_own_timestamp() {
         let alarms = Alarms::new();
         let alarm = alarms.set(1 * S, false);
         let flag = Arc::new(Flag(AtomicBool::new(false)));
         *alarm.waker.borrow_mut() = Some(Waker::from(flag.clone()));
 
         alarms.wake_wakers(500 * MS);
-        assert!(!flag.0.load(Ordering::SeqCst)); // The target tag has not been reached.
+        assert!(!flag.0.load(Ordering::SeqCst)); // The target timestamp has not been reached.
 
         alarms.wake_wakers(1 * S);
-        assert!(flag.0.load(Ordering::SeqCst)); // Reaching the target tag wakes the waiting task.
+        // Reaching the target timestamp wakes the waiting task.
+        assert!(flag.0.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn an_alarm_set_at_a_physical_tag_is_physical() {
+    fn an_alarm_set_at_a_physical_timestamp_is_physical() {
         let alarms = Alarms::new();
         let _physical = alarms.set(1 * S, true);
         assert_eq!(alarms.ent(), Time::FOREVER); // Physical alarms do not limit the logical ENT.
         // Physical alarms still participate in event ordering.
-        assert_eq!(alarms.next_event_tag(), Some(1 * S));
-        assert!(alarms.wake_wakers(1 * S)); // Delivering the alarm marks the tag physical.
+        assert_eq!(alarms.next_event_timestamp(), Some(1 * S));
+        assert!(alarms.wake_wakers(1 * S)); // Delivering the alarm marks the timestamp physical.
 
         let _logical = alarms.set(2 * S, false);
         assert_eq!(alarms.ent(), 2 * S);
@@ -119,8 +120,8 @@ mod tests {
     fn a_dropped_alarm_is_cancelled() {
         let alarms = Alarms::new();
         let alarm = alarms.set(1 * S, false);
-        assert_eq!(alarms.next_event_tag(), Some(1 * S));
+        assert_eq!(alarms.next_event_timestamp(), Some(1 * S));
         drop(alarm);
-        assert_eq!(alarms.next_event_tag(), None);
+        assert_eq!(alarms.next_event_timestamp(), None);
     }
 }

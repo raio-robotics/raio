@@ -21,10 +21,10 @@ impl FixedSource {
         })
     }
     /// Create a physical event that is excluded from ENT promises.
-    pub(super) fn physical(tag: Time) -> Rc<Self> {
+    pub(super) fn physical(timestamp: Time) -> Rc<Self> {
         Rc::new(Self {
             ent: Cell::new(Time::FOREVER),
-            ready: Cell::new(Some(tag)),
+            ready: Cell::new(Some(timestamp)),
             physical: true,
         })
     }
@@ -33,7 +33,7 @@ impl EventSource for FixedSource {
     fn ent(&self) -> Time {
         self.ent.get()
     }
-    fn next_event_tag(&self) -> Option<Time> {
+    fn next_event_timestamp(&self) -> Option<Time> {
         self.ready.get()
     }
     fn wake_wakers(&self, _time: Time) -> bool {
@@ -41,7 +41,7 @@ impl EventSource for FixedSource {
     }
 }
 
-/// The tag, ENT promise and physical flag of each frame a sink received.
+/// The timestamp, ENT promise and physical flag of each frame a sink received.
 pub(super) type Frames = Vec<(Time, Time, bool)>;
 
 pub(super) struct RecordingSink {
@@ -67,22 +67,26 @@ impl EventSink for RecordingSink {
 
 /// Create a FastForward node with a sink that records its output frames.
 pub(super) fn node_rig() -> (Rc<Runtime>, Rc<NodeScheduler>, Rc<RecordingSink>) {
-    let runtime = Rc::new(Runtime::new());
-    let scheduler = Rc::new(NodeScheduler::with_execution_mode(
-        runtime.clone(),
-        ExecutionMode::FastForward,
-    ));
+    let scheduler = NodeScheduler::fast_forward();
+    let runtime = scheduler.runtime.clone();
     let sink = RecordingSink::new();
     scheduler.add_sink(sink.clone());
-    scheduler.start();
+    scheduler.start_clock();
     (runtime, scheduler, sink)
 }
 
 impl NodeScheduler {
-    /// Complete this tag, then advance if event ordering and wall-clock pacing allow it.
+    /// Create a scheduler that does not wait for the wall clock.
+    pub(crate) fn fast_forward() -> Rc<Self> {
+        let scheduler = Rc::new(Self::new(Rc::new(Runtime::new())));
+        scheduler.execution_mode.set(ExecutionMode::FastForward);
+        scheduler
+    }
+
+    /// Complete this timestamp, then advance if event ordering and wall-clock pacing allow it.
     pub(crate) fn try_advance(&self) -> bool {
         self.send_frame(|| self.ent());
-        self.advance_if_due(self.next_safe_tag())
+        self.advance_if_due(self.next_safe_timestamp())
     }
 
     /// Run one user task with no frame-transfer work.
@@ -90,7 +94,7 @@ impl NodeScheduler {
         self.run(async {}, vec![Box::pin(task)]);
     }
 
-    /// Run until no task is runnable and no tag can advance immediately.
+    /// Run until no task is runnable and no timestamp can advance immediately.
     pub(crate) fn run_until_idle(&self) {
         self.run_until(|| true);
     }

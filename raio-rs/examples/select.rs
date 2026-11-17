@@ -42,7 +42,7 @@ impl Merge {
 
     async fn start(self: Rc<Self>) {
         loop {
-            let closed = match select(self.left.pin(), self.right.pin()).await {
+            let closed = match select(self.left.wait(), self.right.wait()).await {
                 Either::Left((value, _)) => value.is_none(),
                 Either::Right((value, _)) => value.is_none(),
             };

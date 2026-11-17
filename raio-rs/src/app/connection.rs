@@ -1,21 +1,21 @@
+//! Connections between nodes: a node registers its ports, and then each output sends one frame
+//! per timestamp to every input that it feeds.
+
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use futures::future::join_all;
 
 use super::port::{InputChannel, OutputChannel};
-use crate::coordinator::{Link, SERIALIZER};
-use crate::messages::{
-    CoordinatorMessage, Downstream, Frame, InputInfo, NodeMessage, OutputInfo, RegisterNode, Reply,
-};
+use super::setting::PortSetting;
+use crate::coordinator::Link;
+use crate::messages::{Downstream, Frame, InputInfo, OutputInfo, RegisterNode, Reply};
 use crate::node::NodeScheduler;
 use crate::runtime::BoxFuture;
 use crate::serializer::Serializer;
 use crate::serializer::bincode::BincodeSerializer;
 use crate::time::Time;
-use crate::transport::{Receiver, Sender};
 
 /// An input port whose payload type is hidden from the node's wiring.
 pub(crate) trait AnyInput {
@@ -33,7 +33,7 @@ pub(crate) trait AnyOutput {
     fn connect_to(self: Rc<Self>, downstream: Downstream) -> BoxFuture<()>;
 }
 
-/// Build the frame that one connection carries for a tag, at the receiver's times.
+/// Build the frame that one connection carries for a timestamp, at the receiver's times.
 fn make_frame<T>(
     serializer: &dyn Serializer<T>,
     delay: Time,
@@ -60,9 +60,9 @@ fn deliver<T>(
     if let Some(bytes) = message.value {
         let value = serializer.deserialize(&bytes);
         if message.physical {
-            // Move late physical events to a tag after the node's current tag.
-            let tag = message.timestamp.max(scheduler.now().next_microstep());
-            channel.push_physical(tag, value);
+            // Move late physical events to a timestamp after the node's current timestamp.
+            let timestamp = message.timestamp.max(scheduler.now().next_microstep());
+            channel.push_physical(timestamp, value);
         } else {
             channel.push(message.timestamp, value);
         }
@@ -70,29 +70,31 @@ fn deliver<T>(
     channel.update_remote_ent(message.ent);
 }
 
-impl<T: 'static> AnyInput for InputChannel<T> {
+/// An input port is its channel, which takes the frames, and its setting.
+impl<T: 'static> AnyInput for (Rc<InputChannel<T>>, Rc<PortSetting<T>>) {
     fn listen(
         self: Rc<Self>,
         scheduler: Rc<NodeScheduler>,
     ) -> BoxFuture<(InputInfo, BoxFuture<()>)> {
         Box::pin(async move {
-            let (serializer_name, serializer) = self.setting.serializers.first();
-            let (transport_name, transport) = self.setting.transports.first();
+            let (channel, setting) = (self.0.clone(), &self.1);
+            let (serializer_name, serializer) = setting.serializers.first();
+            let (transport_name, transport) = setting.transports.first();
             let (endpoint, accept) = transport.listen().await;
             let info = InputInfo {
-                id: self.setting.id.port_id,
+                id: setting.id.port_id,
                 serializer: serializer_name,
                 transport: transport_name,
                 endpoint,
             };
             let receive: BoxFuture<()> = Box::pin(async move {
-                let input = self.clone();
+                let input = channel.clone();
                 accept(Box::new(move |bytes| {
                     let message: Frame = BincodeSerializer.deserialize(&bytes);
                     deliver(&*serializer, &input, &scheduler, message);
                 }))
                 .await;
-                self.close();
+                channel.close();
             });
             (info, receive)
         })
@@ -121,53 +123,14 @@ impl<T: 'static> AnyOutput for OutputChannel<T> {
     }
 }
 
-/// Carry the node's shutdown request to the coordinator and the coordinator's messages to the node.
-fn coordinator_link(
-    scheduler: Rc<NodeScheduler>,
-    mut sender: impl Sender + 'static,
-    mut receiver: impl Receiver + 'static,
-) -> BoxFuture<()> {
-    let (to_coordinator, mut outgoing) = unbounded::<NodeMessage>();
-    let requests = to_coordinator.clone();
-    *scheduler.shutdown_request.borrow_mut() = Some(Box::new(move |delay| {
-        let request = NodeMessage::RequestShutdown(delay);
-        requests.unbounded_send(request).unwrap();
-    }));
-    Box::pin(async move {
-        let send = async move {
-            while let Some(message) = outgoing.next().await {
-                sender.send(&SERIALIZER.serialize(&message)).await;
-            }
-        };
-        let receive = async move {
-            while let Some(bytes) = receiver.recv().await {
-                match SERIALIZER.deserialize(&bytes) {
-                    CoordinatorMessage::RequestNodeShutdown(delay) => {
-                        let offer = NodeMessage::ShutdownTime(scheduler.offer_shutdown(delay));
-                        to_coordinator.unbounded_send(offer).unwrap();
-                    }
-                    CoordinatorMessage::Shutdown(tag) => scheduler.shut_down_at(tag),
-                    CoordinatorMessage::ShutdownNow => scheduler.shut_down_now(),
-                }
-            }
-        };
-        futures::join!(send, receive);
-    })
-}
-
-/// Register the node's ports and return the task that transfers frames over all connections.
+/// Register the node's ports and return the task that transfers frames over all connections,
+/// or `None` if the app does not start.
 pub(crate) async fn connect_node(
     scheduler: Rc<NodeScheduler>,
-    link: Link,
+    mut link: Link,
     inputs: Vec<Rc<dyn AnyInput>>,
     outputs: Vec<Rc<dyn AnyOutput>>,
-) -> BoxFuture<()> {
-    let Link {
-        node_id,
-        mut sender,
-        receiver,
-        ..
-    } = link;
+) -> Option<BoxFuture<()>> {
     let mut registration = RegisterNode {
         inputs: Vec::new(),
         outputs: Vec::new(),
@@ -185,13 +148,16 @@ pub(crate) async fn connect_node(
         registration.outputs.push(info);
     }
 
-    let request = SERIALIZER.serialize(&registration);
-    let reply: Reply = SERIALIZER.deserialize(&sender.call(&request).await);
-    let wiring = reply.unwrap_or_else(|refusal| panic!("node {node_id}: {refusal}"));
-    scheduler.start();
+    let wiring = match link.register(&registration).await {
+        Reply::Wired(wiring) => wiring,
+        Reply::Refused(refusal) => panic!("node {}: {refusal}", link.node_id),
+        Reply::Cancelled => return None,
+    };
+    scheduler.start_clock();
     // The link stays open while the node runs; the node does not wait for it.
-    let link = coordinator_link(scheduler.clone(), sender, receiver);
-    scheduler.runtime.spawn_internal(link);
+    scheduler
+        .runtime
+        .spawn_internal(link.run(scheduler.clone()));
 
     let mut sends = Vec::new();
     for (id, downstreams) in wiring {
@@ -199,9 +165,9 @@ pub(crate) async fn connect_node(
             sends.push(senders[&id].clone().connect_to(downstream));
         }
     }
-    Box::pin(async move {
+    Some(Box::pin(async move {
         futures::join!(join_all(sends), join_all(receives));
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -211,7 +177,7 @@ mod tests {
     use crate::runtime::Runtime;
     use crate::time::{MS, S};
 
-    /// Create a node at logical time 5s for edge-delivery tests.
+    /// Create a node at logical time 5s and an input channel for a connection to deliver to.
     fn node_at_5s() -> (Rc<NodeScheduler>, InputChannel<i64>) {
         let scheduler = Rc::new(NodeScheduler::new(Rc::new(Runtime::new())));
         scheduler.advance_to(5 * S);
@@ -238,32 +204,35 @@ mod tests {
     }
 
     #[test]
-    fn a_logical_frame_keeps_its_tag_plus_the_delay() {
+    fn a_logical_frame_keeps_its_timestamp_plus_the_delay() {
         let (scheduler, channel) = node_at_5s();
         receive(&scheduler, &channel, 7 * S, 6 * S, false);
-        assert_eq!(channel.next_event_tag(), Some(7 * S + 10 * MS));
+        assert_eq!(channel.next_event_timestamp(), Some(7 * S + 10 * MS));
         assert_eq!(channel.ent(), 6 * S + 10 * MS);
     }
 
     #[test]
     fn a_physical_frame_from_this_nodes_past_is_moved_right_after_now() {
         let (scheduler, channel) = node_at_5s();
-        // The delayed sender tag is behind this node's clock.
+        // The delayed sender timestamp is behind this node's clock.
         receive(&scheduler, &channel, 1 * S, 6 * S, true);
-        assert_eq!(channel.next_event_tag(), Some((5 * S).next_microstep()));
-        // Retagging a physical value does not change its ENT promise.
+        assert_eq!(
+            channel.next_event_timestamp(),
+            Some((5 * S).next_microstep())
+        );
+        // Moving a physical value to a later timestamp does not change its ENT promise.
         assert_eq!(channel.ent(), 6 * S + 10 * MS);
     }
 
     #[test]
-    fn a_physical_frame_keeps_the_senders_tag_plus_the_delay() {
+    fn a_physical_frame_keeps_the_senders_timestamp_plus_the_delay() {
         let (scheduler, channel) = node_at_5s();
         receive(&scheduler, &channel, 7 * S, 20 * S, true);
-        assert_eq!(channel.next_event_tag(), Some(7 * S + 10 * MS));
+        assert_eq!(channel.next_event_timestamp(), Some(7 * S + 10 * MS));
     }
 
     #[test]
-    fn an_edge_delivers_in_the_order_it_was_sent() {
+    fn a_connection_delivers_in_the_order_it_was_sent() {
         let (scheduler, channel) = node_at_5s();
         // A late physical value moves to (5s, 1).
         receive(&scheduler, &channel, 1 * S, 6 * S, true);
@@ -273,9 +242,9 @@ mod tests {
         receive(&scheduler, &channel, 6 * S, 20 * S, false);
         let after_now = (5 * S).next_microstep();
         for expected in [after_now, after_now.next_microstep(), 6 * S + 10 * MS] {
-            assert_eq!(channel.next_event_tag(), Some(expected));
+            assert_eq!(channel.next_event_timestamp(), Some(expected));
             channel.wake_wakers(expected);
         }
-        assert_eq!(channel.next_event_tag(), None);
+        assert_eq!(channel.next_event_timestamp(), None);
     }
 }

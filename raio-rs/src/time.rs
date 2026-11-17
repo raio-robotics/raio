@@ -1,3 +1,5 @@
+//! Logical time: a `Time` is a timestamp, which is a point on a node's timeline, or a duration.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, Mul, Sub};
@@ -12,7 +14,9 @@ pub struct Time {
 
 impl Time {
     pub const ZERO: Time = Time::new(0);
+    /// Earlier than every timestamp.
     pub const NEVER: Time = Time::new(i64::MIN);
+    /// Later than every timestamp.
     pub const FOREVER: Time = Time::new(i64::MAX);
 
     pub const fn new(nanos: i64) -> Self {
@@ -159,19 +163,20 @@ mod tests {
 
     #[test]
     fn microsteps_order_within_a_nanosecond() {
-        let tag = 1 * S;
-        assert!(tag < tag.next_microstep());
-        assert!(tag.next_microstep() < tag.next_microstep().next_microstep());
-        assert!(tag.next_microstep() < 1 * S + NS); // Nanoseconds take precedence over microsteps.
+        let timestamp = 1 * S;
+        assert!(timestamp < timestamp.next_microstep());
+        assert!(timestamp.next_microstep() < timestamp.next_microstep().next_microstep());
+        // Nanoseconds take precedence over microsteps.
+        assert!(timestamp.next_microstep() < 1 * S + NS);
     }
 
     #[test]
     fn a_delay_resets_the_microstep_and_zero_keeps_it() {
-        let tag = (1 * S).next_microstep();
-        assert_eq!(tag + Time::ZERO, tag);
-        assert_eq!(tag + NS, 1 * S + NS);
-        assert_eq!(tag.microstep(), 1);
-        assert_eq!((tag + NS).microstep(), 0);
+        let timestamp = (1 * S).next_microstep();
+        assert_eq!(timestamp + Time::ZERO, timestamp);
+        assert_eq!(timestamp + NS, 1 * S + NS);
+        assert_eq!(timestamp.microstep(), 1);
+        assert_eq!((timestamp + NS).microstep(), 0);
     }
 
     #[test]

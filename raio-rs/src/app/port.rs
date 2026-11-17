@@ -1,58 +1,42 @@
+//! Ports. A channel holds the values of a port, which the node's scheduler and the port's
+//! connections share; the port itself is the handle that the node's tasks hold.
+
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::BTreeMap;
-use std::fmt;
 use std::future::Future;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 
+use super::reaction::Trigger;
 use super::setting::PortSetting;
-use crate::node::{EventSink, EventSource, NodeId, NodeScheduler};
+use crate::node::{EventSink, EventSource, NodeScheduler};
 use crate::runtime::{Runtime, TaskId, WakeKind};
 use crate::serializer::Serializer;
 use crate::time::Time;
 use crate::transport::Transport;
 
-/// A port of a node, by its position among the ports the node built.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct PortId {
-    pub node_id: NodeId,
-    pub port_id: usize,
-}
-
-impl fmt::Display for PortId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "port {} of node {}", self.port_id, self.node_id)
-    }
-}
-
-/// Buffers incoming values until the scheduler delivers their tags.
+/// Buffers incoming values until the scheduler delivers their timestamps. An input port has one,
+/// which its connection feeds, and an action has one, which the threads of its program feed.
 pub(crate) struct InputChannel<T> {
-    /// The values still to deliver, by tag; the flag marks a physical value.
+    /// The values still to deliver, by timestamp; the flag marks a physical value.
     queue: RefCell<BTreeMap<Time, (T, bool)>>,
-    /// The last delivered value and its tag.
+    /// The last delivered value and its timestamp.
     latest: RefCell<Option<(Time, T)>>,
     /// Each waiting task has a Resume waker for values and a Physical waker for closure.
     /// The tasks wake in the order they were spawned.
     waiters: RefCell<BTreeMap<TaskId, (Waker, Waker)>>,
     remote_ent: Cell<Time>,
     closed: Cell<bool>,
-    pub(crate) setting: PortSetting<T>,
 }
 
 impl<T> InputChannel<T> {
-    pub fn new() -> Self {
-        Self::with_setting(PortSetting::local())
-    }
-
-    pub(crate) fn with_setting(setting: PortSetting<T>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             queue: RefCell::new(BTreeMap::new()),
             latest: RefCell::new(None),
             waiters: RefCell::new(BTreeMap::new()),
             remote_ent: Cell::new(Time::ZERO),
             closed: Cell::new(false),
-            setting,
         }
     }
 
@@ -63,39 +47,39 @@ impl<T> InputChannel<T> {
             .map_or(Time::NEVER, |(timestamp, _)| *timestamp)
     }
 
-    /// Return the latest received tag, including values still queued.
+    /// Return the latest received timestamp, including values still queued.
     fn last_received(&self) -> Time {
         self.queue
             .borrow()
             .last_key_value()
-            .map_or_else(|| self.latest_timestamp(), |(tag, _)| *tag)
+            .map_or_else(|| self.latest_timestamp(), |(timestamp, _)| *timestamp)
     }
 
     pub(crate) fn push(&self, timestamp: Time, value: T) {
         assert!(
             timestamp >= self.remote_ent.get(),
-            "edge broke its ENT promise: {timestamp} arrived after promising {}",
+            "connection broke its ENT promise: {timestamp} arrived after promising {}",
             self.remote_ent.get()
         );
         assert!(
             timestamp > self.last_received(),
-            "edge delivered a logical value at {timestamp} behind one at {}",
+            "connection delivered a logical value at {timestamp} behind one at {}",
             self.last_received()
         );
         self.queue.borrow_mut().insert(timestamp, (value, false));
     }
 
-    /// Queue a physical value, moving its tag forward when needed to preserve arrival order.
-    pub(crate) fn push_physical(&self, tag: Time, value: T) {
-        let tag = tag.max(self.last_received().next_microstep());
-        let taken = self.queue.borrow_mut().insert(tag, (value, true));
-        assert!(taken.is_none(), "two values at {tag}");
+    /// Queue a physical value, moving its timestamp forward when needed to preserve arrival order.
+    pub(crate) fn push_physical(&self, timestamp: Time, value: T) {
+        let timestamp = timestamp.max(self.last_received().next_microstep());
+        let taken = self.queue.borrow_mut().insert(timestamp, (value, true));
+        assert!(taken.is_none(), "two values at {timestamp}");
     }
 
     pub(crate) fn update_remote_ent(&self, promise: Time) {
         assert!(
             promise >= self.remote_ent.get(),
-            "edge lowered its ENT promise from {} to {promise}",
+            "connection lowered its ENT promise from {} to {promise}",
             self.remote_ent.get()
         );
         self.remote_ent.set(promise);
@@ -104,18 +88,60 @@ impl<T> InputChannel<T> {
     pub(crate) fn close(&self) {
         self.update_remote_ent(Time::FOREVER);
         self.closed.set(true);
-        // Closing an empty input resumes its waiters at physical tags.
+        // Closing an empty input resumes its waiters at physical timestamps.
         if self.queue.borrow().is_empty() {
-            for (_, (_, physical)) in std::mem::take(&mut *self.waiters.borrow_mut()) {
+            for (_, (_, physical)) in self.waiters.take() {
                 physical.wake();
             }
         }
     }
 
-    fn wake(&self) {
-        for (_, (logical, _)) in std::mem::take(&mut *self.waiters.borrow_mut()) {
-            logical.wake();
-        }
+    /// The value delivered at the timestamp `now`, if any.
+    pub(crate) fn get(&self, now: Time) -> Option<Ref<'_, T>> {
+        self.latest()
+            .and_then(|(value, timestamp)| (timestamp == now).then_some(value))
+    }
+
+    /// The latest value delivered, and its timestamp.
+    pub(crate) fn latest(&self) -> Option<(Ref<'_, T>, Time)> {
+        let timestamp = self.latest_timestamp();
+        Ref::filter_map(self.latest.borrow(), |latest| {
+            latest.as_ref().map(|(_, value)| value)
+        })
+        .ok()
+        .map(|value| (value, timestamp))
+    }
+
+    /// True once the channel has closed and delivered every value.
+    pub(crate) fn drained(&self) -> bool {
+        self.closed.get() && self.queue.borrow().is_empty()
+    }
+
+    /// Wait for a value after `called_at`; return `None` when the channel has drained.
+    pub(crate) fn wait(
+        &self,
+        called_at: Time,
+    ) -> impl Future<Output = Option<(Ref<'_, T>, Time)>> + Unpin {
+        assert!(
+            self.latest_timestamp() <= called_at,
+            "latest timestamp is in the future"
+        );
+        std::future::poll_fn(move |cx| {
+            if self.latest_timestamp() > called_at {
+                return Poll::Ready(self.latest());
+            };
+            if self.drained() {
+                return Poll::Ready(None);
+            };
+            self.waiters.borrow_mut().insert(
+                Runtime::current_task(cx),
+                (
+                    Runtime::waker(cx, WakeKind::Resume),
+                    Runtime::waker(cx, WakeKind::Physical),
+                ),
+            );
+            Poll::Pending
+        })
     }
 }
 
@@ -130,8 +156,8 @@ impl<T> EventSource for InputChannel<T> {
             .min(self.remote_ent.get())
     }
 
-    /// Return the first queued tag once earlier logical arrivals are ruled out.
-    fn next_event_tag(&self) -> Option<Time> {
+    /// Return the first queued timestamp once earlier logical arrivals are ruled out.
+    fn next_event_timestamp(&self) -> Option<Time> {
         let queue = self.queue.borrow();
         let (head, (_, physical)) = queue.first_key_value()?;
         (!physical || *head < self.remote_ent.get()).then_some(*head)
@@ -142,7 +168,10 @@ impl<T> EventSource for InputChannel<T> {
         let mut delivered = false;
         {
             let mut queue = self.queue.borrow_mut();
-            while queue.first_key_value().is_some_and(|(tag, _)| *tag <= time) {
+            while queue
+                .first_key_value()
+                .is_some_and(|(timestamp, _)| *timestamp <= time)
+            {
                 let (timestamp, (value, is_physical)) = queue.pop_first().unwrap();
                 *self.latest.borrow_mut() = Some((timestamp, value));
                 physical |= is_physical;
@@ -150,15 +179,18 @@ impl<T> EventSource for InputChannel<T> {
             }
         }
         if delivered {
-            self.wake();
+            for (_, (logical, _)) in self.waiters.take() {
+                logical.wake();
+            }
         }
         physical
     }
 }
 
-/// Lets user tasks read or await values delivered by an input channel.
+/// Lets user tasks read or await the values that a connection delivers.
 pub struct InputPort<T> {
     pub(crate) channel: Rc<InputChannel<T>>,
+    pub(crate) setting: Rc<PortSetting<T>>,
     pub(crate) scheduler: Rc<NodeScheduler>,
 }
 
@@ -166,78 +198,47 @@ impl<T> InputPort<T> {
     /// Use this serializer in place of the port's default.
     pub fn set_serializer(&self, serializer: impl Serializer<T> + 'static) {
         let name = serializer.name().to_string();
-        let serializers = &self.channel.setting.serializers;
-        serializers.set(name, Rc::new(serializer));
+        self.setting.serializers.set(name, Rc::new(serializer));
     }
 
     /// Use this transport in place of the port's default.
     pub fn set_transport(&self, transport: impl Transport + 'static) {
         let name = transport.name().to_string();
-        let transports = &self.channel.setting.transports;
-        transports.set(name, Rc::new(transport));
+        self.setting.transports.set(name, Rc::new(transport));
     }
 
-    /// The value delivered at the current tag, if any.
+    /// The value delivered at the current timestamp, if any.
     pub fn get(&self) -> Option<Ref<'_, T>> {
-        let now = self.scheduler.now();
-        self.latest()
-            .and_then(|(value, timestamp)| (timestamp == now).then_some(value))
+        self.channel.get(self.scheduler.now())
     }
 
+    /// The latest value delivered, and its timestamp.
     pub fn latest(&self) -> Option<(Ref<'_, T>, Time)> {
-        let timestamp = self.channel.latest_timestamp();
-        Ref::filter_map(self.channel.latest.borrow(), |latest| {
-            latest.as_ref().map(|(_, value)| value)
-        })
-        .ok()
-        .map(|value| (value, timestamp))
+        self.channel.latest()
     }
 
     /// True once the input has closed and delivered every value.
     pub fn closed(&self) -> bool {
-        self.channel.closed.get() && self.channel.queue.borrow().is_empty()
+        self.channel.drained()
     }
 
-    /// Wait for a value after this call's tag; return `None` when the input closes and drains.
-    pub fn wait(&self) -> impl Future<Output = Option<(Ref<'_, T>, Time)>> {
-        let called_at = self.scheduler.now();
-        assert!(
-            self.channel.latest_timestamp() <= called_at,
-            "latest timestamp is in the future"
-        );
-        std::future::poll_fn(move |cx| {
-            if self.channel.latest_timestamp() > called_at {
-                return Poll::Ready(self.latest());
-            };
-            if self.closed() {
-                return Poll::Ready(None);
-            };
-            self.channel.waiters.borrow_mut().insert(
-                Runtime::current_task(cx),
-                (
-                    Runtime::waker(cx, WakeKind::Resume),
-                    Runtime::waker(cx, WakeKind::Physical),
-                ),
-            );
-            Poll::Pending
-        })
+    /// Wait for a value after this call's timestamp; return `None` when the input closes and
+    /// drains.
+    pub fn wait(&self) -> impl Future<Output = Option<(Ref<'_, T>, Time)>> + Unpin {
+        self.channel.wait(self.scheduler.now())
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn pin(&self) -> Pin<Box<impl Future<Output = Option<(Ref<'_, T>, Time)>>>> {
-        Box::pin(self.wait())
-    }
-
-    pub fn trigger(&self) -> Pin<Box<dyn Future<Output = bool> + '_>> {
+    /// Wait as `wait` does, for a reaction: true for a value, false once the input has closed.
+    pub fn trigger(&self) -> Trigger<'_> {
         let wait = self.wait();
         Box::pin(async move { wait.await.is_some() })
     }
 }
 
-/// Sends one tag's frame, with its value if set, over one connection.
+/// Sends one timestamp's frame, with its value if set, over one connection.
 pub(crate) type OutputSender<T> = Box<dyn Fn(Time, Time, bool, Option<&T>)>;
 
-/// Holds the current tag's output value and the callbacks that transmit its frame.
+/// Holds the current timestamp's output value and the callbacks that transmit its frame.
 pub(crate) struct OutputChannel<T> {
     pub(crate) cell: RefCell<Option<T>>,
     pub(crate) senders: RefCell<Vec<OutputSender<T>>>,
@@ -268,7 +269,7 @@ impl<T> EventSink for OutputChannel<T> {
     }
 }
 
-/// Lets user tasks set the value sent when the current tag completes.
+/// Lets user tasks set the value sent when the current timestamp completes.
 pub struct OutputPort<T> {
     pub(crate) channel: Rc<OutputChannel<T>>,
     pub(crate) scheduler: Rc<NodeScheduler>,
@@ -296,15 +297,18 @@ impl<T> OutputPort<T> {
         transports.set(name, Rc::new(transport));
     }
 
+    /// Set the value that the node sends when the current timestamp completes.
     pub fn set(&self, value: T) {
         assert!(
-            !self.scheduler.tag_complete(),
-            "output set at {}, a tag the node already completed; tag 0 completes at startup, so wait first",
+            !self.scheduler.timestamp_complete(),
+            "output set at {}, a timestamp the node already completed; \
+             timestamp 0 completes at startup, so wait first",
             self.scheduler.now()
         );
         *self.channel.cell.borrow_mut() = Some(value);
     }
 
+    /// Clear the value set at the current timestamp.
     pub fn reset(&self) {
         *self.channel.cell.borrow_mut() = None;
     }
@@ -316,8 +320,13 @@ impl InputPort<i64> {
     pub(crate) fn local(scheduler: &Rc<NodeScheduler>) -> (Self, Rc<InputChannel<i64>>) {
         let channel = Rc::new(InputChannel::new());
         scheduler.add_source(channel.clone());
+        let id = crate::coordinator::PortId {
+            node_id: 0,
+            port_id: 0,
+        };
         let port = InputPort {
             channel: channel.clone(),
+            setting: Rc::new(PortSetting::new(id)),
             scheduler: scheduler.clone(),
         };
         (port, channel)
@@ -328,7 +337,6 @@ impl InputPort<i64> {
 mod tests {
     use super::*;
     use crate::app::Builder;
-    use crate::node::ExecutionMode;
     use crate::serializer::tests::Decimal;
     use crate::time::S;
     use crate::transport::tests::Loopback;
@@ -354,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn latch_folds_tags_up_to_time() {
+    fn latch_folds_timestamps_up_to_time() {
         let ch = channel();
         ch.push(1 * S, 1);
         ch.push(2 * S, 2);
@@ -365,13 +373,13 @@ mod tests {
         assert_eq!(*ch.latest.borrow(), Some((2 * S, 2)));
         assert_eq!(ch.queue.borrow().len(), 1); // The 3s value remains queued.
 
-        ch.wake_wakers(2 * S); // Repeating delivery at the same tag has no effect.
+        ch.wake_wakers(2 * S); // Repeating delivery at the same timestamp has no effect.
         assert_eq!(*ch.latest.borrow(), Some((2 * S, 2)));
     }
 
     #[test]
     #[should_panic(expected = "broke its ENT promise")]
-    fn a_push_before_the_promise_is_an_edge_bug() {
+    fn a_push_before_the_promise_is_a_connection_bug() {
         let ch = channel();
         ch.update_remote_ent(2 * S);
         ch.push(1 * S, 2);
@@ -391,13 +399,13 @@ mod tests {
     }
 
     #[test]
-    fn a_physical_value_at_a_taken_tag_takes_the_next_microstep() {
+    fn a_physical_value_at_a_taken_timestamp_takes_the_next_microstep() {
         let ch = channel();
         ch.push(3 * S, 1);
         ch.push_physical(3 * S, 2);
 
         ch.wake_wakers(3 * S);
-        // Logical values retain their sender's tag.
+        // Logical values retain their sender's timestamp.
         assert_eq!(*ch.latest.borrow(), Some((3 * S, 1)));
         ch.wake_wakers((3 * S).next_microstep());
         assert_eq!(*ch.latest.borrow(), Some(((3 * S).next_microstep(), 2)));
@@ -405,10 +413,10 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "behind one at")]
-    fn a_logical_value_behind_a_physical_one_is_an_edge_bug() {
+    fn a_logical_value_behind_a_physical_one_is_a_connection_bug() {
         let ch = channel();
         ch.push_physical(3 * S, 2);
-        // A logical value cannot arrive behind an earlier value on the same edge.
+        // A logical value cannot arrive behind an earlier value on the same connection.
         ch.push(3 * S, 1);
     }
 
@@ -416,7 +424,7 @@ mod tests {
     fn a_logical_head_is_ready_regardless_of_the_promise() {
         let ch = channel();
         ch.push(1 * S, 1); // Ordered delivery rules out an earlier logical value.
-        assert_eq!(ch.next_event_tag(), Some(1 * S));
+        assert_eq!(ch.next_event_timestamp(), Some(1 * S));
     }
 
     #[test]
@@ -424,11 +432,11 @@ mod tests {
         let ch = channel();
         ch.push_physical(3 * S, 7);
         ch.update_remote_ent(2 * S); // The upstream may still send a logical value before 3s.
-        assert_eq!(ch.next_event_tag(), None);
+        assert_eq!(ch.next_event_timestamp(), None);
         assert_eq!(ch.ent(), 2 * S);
 
         ch.update_remote_ent(4 * S); // The new ENT rules out logical values at or before 3s.
-        assert_eq!(ch.next_event_tag(), Some(3 * S));
+        assert_eq!(ch.next_event_timestamp(), Some(3 * S));
         assert_eq!(ch.ent(), 4 * S); // The physical value does not lower ENT.
     }
 
@@ -441,7 +449,7 @@ mod tests {
         ch.update_remote_ent(10 * S);
 
         // The physical value is delivered before the logical value.
-        assert_eq!(ch.next_event_tag(), Some(3 * S));
+        assert_eq!(ch.next_event_timestamp(), Some(3 * S));
         assert_eq!(ch.ent(), 7 * S); // Only the queued logical value lowers ENT.
     }
 
@@ -486,21 +494,24 @@ mod tests {
 
     #[test]
     fn output_channel_fans_out_to_every_sender() {
-        let ch = OutputChannel::<i64>::new(PortSetting::local());
+        let ch = OutputChannel::<i64>::new(PortSetting::new(crate::coordinator::PortId {
+            node_id: 0,
+            port_id: 0,
+        }));
         let log = Rc::new(RefCell::new(Vec::new()));
-        for edge in [1, 2] {
+        for connection in [1, 2] {
             let log = log.clone();
             ch.senders
                 .borrow_mut()
                 .push(Box::new(move |timestamp, ent, physical, value| {
                     log.borrow_mut()
-                        .push((edge, timestamp, ent, physical, value.copied()));
+                        .push((connection, timestamp, ent, physical, value.copied()));
                 }));
         }
 
         *ch.cell.borrow_mut() = Some(7);
         ch.send(1 * S, 2 * S, true);
-        // Both connections carry the tag's value.
+        // Both connections carry the timestamp's value.
         assert_eq!(
             *log.borrow(),
             vec![
@@ -510,7 +521,7 @@ mod tests {
         );
 
         ch.send(2 * S, 3 * S, false);
-        // A tag without a value still sends its frame on every connection.
+        // A timestamp without a value still sends its frame on every connection.
         assert_eq!(
             log.borrow()[2..],
             [
@@ -535,10 +546,7 @@ mod tests {
 
     impl Rig {
         fn new() -> Self {
-            let scheduler = Rc::new(NodeScheduler::with_execution_mode(
-                Rc::new(Runtime::new()),
-                ExecutionMode::FastForward,
-            ));
+            let scheduler = NodeScheduler::fast_forward();
             Self { scheduler }
         }
 
@@ -546,7 +554,7 @@ mod tests {
             InputPort::local(&self.scheduler)
         }
 
-        /// Run tasks and advance tags until no immediate work remains.
+        /// Run tasks and advance timestamps until no immediate work remains.
         fn settle(&self) {
             self.scheduler.run_until_idle();
         }
@@ -619,13 +627,14 @@ mod tests {
         });
         rig.settle();
 
-        // The right input may still deliver a value at the left input's queued tag.
+        // The right input may still deliver a value at the left input's queued timestamp.
         left_ch.push(2 * S, 1);
         left_ch.update_remote_ent(4 * S);
         right_ch.update_remote_ent(2 * S);
         rig.scheduler.try_advance();
         rig.settle();
-        assert!(seen.borrow().is_empty()); // An ENT equal to the pending tag still blocks delivery.
+        // An ENT equal to the pending timestamp still blocks delivery.
+        assert!(seen.borrow().is_empty());
         assert_eq!(rig.scheduler.now(), Time::ZERO);
 
         // Advancing the right input's ENT past 2s allows delivery.
@@ -637,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_tags_settle_in_one_instant() {
+    fn simultaneous_timestamps_settle_in_one_instant() {
         let rig = Rig::new();
         let (left, left_ch) = rig.port();
         let (right, right_ch) = rig.port();
@@ -734,7 +743,7 @@ mod tests {
         channel.close(); // Closing the input preserves its queued values.
         rig.settle();
 
-        // The scheduler delivers both queued tags before the waiter observes closure.
+        // The scheduler delivers both queued timestamps before the waiter observes closure.
         assert_eq!(*seen.borrow(), vec![1, 2]);
         assert!(done.get());
         assert_eq!(rig.scheduler.now(), 2 * S);
@@ -752,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn a_close_resumes_the_waiter_at_a_physical_tag() {
+    fn a_close_resumes_the_waiter_at_a_physical_timestamp() {
         let rig = Rig::new();
         let (port, channel) = rig.port();
         let seen = Rc::new(Cell::new(None));
@@ -762,12 +771,12 @@ mod tests {
             assert!(port.wait().await.is_none());
             out.set(Some((scheduler.now(), scheduler.is_physical())));
         });
-        rig.settle(); // The waiter is suspended at the initial tag.
+        rig.settle(); // The waiter is suspended at the initial timestamp.
 
         channel.close(); // Closing an empty input schedules a physical resumption.
         rig.settle();
-        let (tag, physical) = seen.get().unwrap();
-        assert!(tag > Time::ZERO, "{tag}");
+        let (timestamp, physical) = seen.get().unwrap();
+        assert!(timestamp > Time::ZERO, "{timestamp}");
         assert!(physical);
     }
 
@@ -793,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn a_physical_value_marks_its_tag_and_only_its_tag() {
+    fn a_physical_value_marks_its_timestamp_and_only_its_timestamp() {
         let rig = Rig::new();
         let (_port, channel) = rig.port();
 
@@ -807,7 +816,7 @@ mod tests {
         channel.update_remote_ent(6 * S);
         rig.scheduler.try_advance();
         assert_eq!(rig.scheduler.now(), 5 * S);
-        // A later logical event clears the tag's physical flag.
+        // A later logical event clears the timestamp's physical flag.
         assert!(!rig.scheduler.is_physical());
     }
 }

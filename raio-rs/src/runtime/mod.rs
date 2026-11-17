@@ -1,3 +1,6 @@
+//! A single-threaded executor. Each waker says whether its task resumes at the node's current
+//! timestamp or at a new physical timestamp; the node's scheduler applies that.
+
 mod waker;
 
 use crate::driver::{Driver, Notifier};
@@ -8,7 +11,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::task::{Context, Waker};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub type TaskId = usize;
 pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
@@ -21,12 +24,15 @@ thread_local! {
     static IDLE_HOOK: Cell<Option<IdleHook>> = const { Cell::new(None) };
 }
 
+/// The longest that a runtime with tasks to run goes without looking for ready I/O.
+const IO_POLL_PERIOD: Duration = Duration::from_millis(10);
+
 /// A waker's instruction for scheduling the task that it wakes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WakeKind {
-    /// Poll at the current tag, whether that tag is logical or physical.
+    /// Poll at the current timestamp, whether that timestamp is logical or physical.
     Resume,
-    /// Request a new physical tag before polling the task.
+    /// Request a new physical timestamp before polling the task.
     Physical,
 }
 
@@ -59,6 +65,8 @@ pub struct Runtime {
     ready: RefCell<VecDeque<(TaskId, WakeKind)>>,
     tasks: RefCell<HashMap<TaskId, Task>>,
     next_task_id: Cell<TaskId>,
+    /// The last time the driver looked for ready I/O.
+    io_polled: Cell<Instant>,
 }
 
 impl Default for Runtime {
@@ -79,6 +87,7 @@ impl Runtime {
             ready: RefCell::new(VecDeque::new()),
             tasks: RefCell::new(HashMap::new()),
             next_task_id: Cell::new(0),
+            io_polled: Cell::new(Instant::now()),
         }
     }
 
@@ -87,7 +96,7 @@ impl Runtime {
         self.spawn_kind(future, WakeKind::Physical)
     }
 
-    /// Spawn an internal task whose default waker resumes at the current tag.
+    /// Spawn an internal task whose default waker resumes at the current timestamp.
     pub fn spawn_internal(&self, future: impl Future<Output = ()> + 'static) -> TaskId {
         self.spawn_kind(future, WakeKind::Resume)
     }
@@ -100,7 +109,7 @@ impl Runtime {
             waker: self.waker_for(task_id, kind),
         };
         self.tasks.borrow_mut().insert(task_id, task);
-        // The first poll runs at the current tag.
+        // The first poll runs at the current timestamp.
         self.wake_sender.send((task_id, WakeKind::Resume));
         task_id
     }
@@ -148,8 +157,19 @@ impl Runtime {
                 Some(hook) => hook(&mut wait),
                 None => wait(),
             }
+            self.io_polled.set(Instant::now());
             self.next_wake()
         })
+    }
+
+    /// Wake the tasks whose I/O is ready or whose timers are due, without waiting. A runtime
+    /// that never waits calls this between its tasks; most calls return at once.
+    pub(crate) fn poll_io(&self) {
+        let now = Instant::now();
+        if now.duration_since(self.io_polled.get()) >= IO_POLL_PERIOD {
+            Driver::with(|driver| driver.wait(Some(now))).expect("the I/O poller failed");
+            self.io_polled.set(now);
+        }
     }
 
     pub(crate) fn finished(&self, task: TaskId) -> bool {
@@ -169,11 +189,10 @@ impl Runtime {
 
     /// Drop every task that has not finished.
     pub(crate) fn clear(&self) {
-        let tasks = std::mem::take(&mut *self.tasks.borrow_mut());
-        drop(tasks);
+        drop(self.tasks.take());
     }
 
-    /// Run a future to completion, polling all wakes without applying tag scheduling.
+    /// Run a future to completion, polling all wakes without applying timestamp scheduling.
     pub fn block_on<T: 'static>(&self, future: impl Future<Output = T> + 'static) -> T {
         let output = Rc::new(Cell::new(None));
         let slot = output.clone();

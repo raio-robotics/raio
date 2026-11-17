@@ -1,3 +1,5 @@
+//! Carrying bytes between processes.
+
 pub mod tcp;
 
 use std::future::Future;
@@ -8,7 +10,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 
 use crate::runtime::BoxFuture;
 
-/// Creates the listeners and connections of one kind of link.
+/// One way to carry bytes: it creates the listeners and the connections.
 pub trait Transport {
     type Listener: Listener<Sender = Self::Sender, Receiver = Self::Receiver>;
     type Sender: Sender;
@@ -26,6 +28,7 @@ pub trait Transport {
     fn connect(&self, endpoint: &str) -> impl Future<Output = (Self::Sender, Self::Receiver)>;
 }
 
+/// Accepts the connections that are made to one address.
 pub trait Listener {
     type Sender: Sender;
     type Receiver: Receiver;
@@ -36,6 +39,7 @@ pub trait Listener {
     fn accept(&mut self) -> impl Future<Output = (Self::Sender, Self::Receiver)>;
 }
 
+/// The sending half of a connection.
 pub trait Sender {
     /// Send a message to the remote endpoint.
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = ()>;
@@ -44,6 +48,7 @@ pub trait Sender {
     fn call(&mut self, request: &[u8]) -> impl Future<Output = Vec<u8>>;
 }
 
+/// The receiving half of a connection.
 pub trait Receiver {
     /// Receive one complete message, or `None` when the peer closes the connection.
     fn recv(&mut self) -> impl Future<Output = Option<Vec<u8>>>;

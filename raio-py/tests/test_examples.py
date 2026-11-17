@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
-NAMES = ["action", "hello", "join", "mixed", "reaction", "same_tag", "select_first"]
+NAMES = ["action", "hello", "join", "mixed", "reaction", "same_timestamp", "select_first"]
 NAMES += ["serializer", "shutdown", "sync"]
 
 
@@ -66,8 +66,8 @@ def test_reaction(finished):
     ]
 
 
-def test_same_tag(finished):
-    assert printed(finished, "same_tag") == ["worker sets 7 at 700ms", "sink got 7 at 700ms"]
+def test_same_timestamp(finished):
+    assert printed(finished, "same_timestamp") == ["worker sets 7 at 700ms", "sink got 7 at 700ms"]
 
 
 def test_select_first(finished):

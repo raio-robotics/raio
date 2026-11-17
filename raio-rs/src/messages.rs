@@ -1,12 +1,16 @@
+//! Everything that crosses a process boundary: the messages between a node and its coordinator,
+//! in the order of their stages, and the frame that a connection carries.
+
 use serde::{Deserialize, Serialize};
 
+use crate::node::NodeId;
 use crate::time::Time;
 use std::collections::HashMap;
 
 /// A node's first message to its coordinator: it asks for the code its launcher left for it.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RequestCode {
-    pub node_id: usize,
+    pub node_id: NodeId,
 }
 
 /// The code the coordinator holds for a node; a node written in Rust has none.
@@ -49,37 +53,49 @@ pub struct Downstream {
 /// The connections that each output of one node feeds, keyed by port id.
 pub type Wiring = HashMap<usize, Vec<Downstream>>;
 
-/// A node's wiring, or the reason the coordinator refused the graph.
-pub type Reply = Result<Wiring, String>;
-
-/// What a node sends its coordinator after it has registered.
+/// The coordinator's reply to a node that has registered.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub enum NodeMessage {
-    /// Ask the coordinator to shut down every node at one tag, this long after their current tags.
-    RequestShutdown(Time),
-    /// The tag at which the node offers to shut down, in reply to `RequestNodeShutdown`.
-    ShutdownTime(Time),
+pub enum Reply {
+    /// The app starts, and this is the node's wiring.
+    Wired(Wiring),
+    /// The graph does not fit the ports that the nodes registered, for this reason.
+    Refused(String),
+    /// Another node failed before the app was wired, so the app does not start.
+    Cancelled,
 }
 
-/// What the coordinator sends a node after its wiring.
+/// A message from a node to its coordinator, once the node has registered.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub enum NodeMessage {
+    /// Ask the coordinator to shut down every node at one timestamp, this long after their
+    /// current timestamps.
+    RequestShutdown(Time),
+    /// The timestamp at which the node offers to shut down, in reply to `RequestNodeShutdown`.
+    ShutdownTime(Time),
+    /// The node still runs; a running node sends this every `HEARTBEAT_PERIOD`.
+    Heartbeat,
+}
+
+/// A message from the coordinator to a node, once the node is wired.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub enum CoordinatorMessage {
-    /// Ask the node to offer its current tag plus this delay as its shutdown tag.
+    /// Ask the node to offer its current timestamp plus this delay as its shutdown timestamp.
     RequestNodeShutdown(Time),
-    /// Shut down at this tag, the latest that any node offered.
+    /// Shut down at this timestamp, the latest that any node offered.
     Shutdown(Time),
-    /// Shut down at once: the app was interrupted.
+    /// Shut down at once: the app was interrupted, or one of its nodes failed.
     ShutdownNow,
 }
 
-/// A connection's output for one tag, including its ENT promise and optional serialized value.
+/// A connection's output for one timestamp, including its ENT promise and optional serialized
+/// value.
 ///
 /// The sender adds the connection's delay, so both times are the receiver's.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Frame {
     pub timestamp: Time,
     pub ent: Time,
-    /// Physical frames may be retagged to keep them ahead of the receiver's logical clock.
+    /// A physical frame may get a later timestamp, which keeps it ahead of the receiver's clock.
     pub physical: bool,
     pub value: Option<Vec<u8>>,
 }

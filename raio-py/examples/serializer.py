@@ -17,7 +17,7 @@ class Producer(Node):
 
     @task
     async def produce(self):
-        await raio.sleep(1 * MS)
+        await raio.wait(1 * MS)
         self.out.set(42)
 
 

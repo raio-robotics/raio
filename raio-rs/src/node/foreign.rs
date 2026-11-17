@@ -6,7 +6,7 @@ use super::EventSource;
 use crate::runtime::TaskId;
 use crate::time::Time;
 
-/// Tasks waiting for their assigned physical resumption tags.
+/// Tasks waiting for their assigned physical resumption timestamps.
 pub(super) struct ForeignSource {
     pending: RefCell<HashMap<TaskId, (Time, Waker)>>,
 }
@@ -18,7 +18,7 @@ impl ForeignSource {
         }
     }
 
-    /// Schedule a task's resumption once; repeated wakes keep its original tag.
+    /// Schedule a task's resumption once; repeated wakes keep its original timestamp.
     pub(super) fn defer(&self, task: TaskId, resumption: impl FnOnce() -> (Time, Waker)) {
         self.pending
             .borrow_mut()
@@ -37,15 +37,19 @@ impl EventSource for ForeignSource {
         Time::FOREVER // Foreign completions do not limit the logical ENT.
     }
 
-    fn next_event_tag(&self) -> Option<Time> {
-        self.pending.borrow().values().map(|(tag, _)| *tag).min()
+    fn next_event_timestamp(&self) -> Option<Time> {
+        self.pending
+            .borrow()
+            .values()
+            .map(|(timestamp, _)| *timestamp)
+            .min()
     }
 
     fn wake_wakers(&self, time: Time) -> bool {
         let due: Vec<_> = self
             .pending
             .borrow_mut()
-            .extract_if(|_, (tag, _)| *tag <= time)
+            .extract_if(|_, (timestamp, _)| *timestamp <= time)
             .collect();
         for (_, (_, resume)) in &due {
             resume.wake_by_ref();

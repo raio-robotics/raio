@@ -1,18 +1,21 @@
+//! A node's ports as Python reaches them: by their position among the ports of the node that
+//! runs on this thread.
+
+use std::cell::Ref;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyRuntimeError, PyStopAsyncIteration, PyTypeError};
+use pyo3::exceptions::{PyException, PyRuntimeError, PyStopAsyncIteration};
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
-use pyo3::types::PyBytes;
-use raio::app::{Action, ActionHandle, InputPort, OutputPort};
-use raio::serializer::{Payload, Serializer};
+use raio::app::{Action, ActionHandle, InputPort, OutputPort, Trigger};
 use raio::time::Time;
 
 use crate::awaitable::Awaitable;
 use crate::node::running;
+use crate::serializer::PyValue;
 use crate::time::PyTime;
 
 create_exception!(
@@ -22,84 +25,6 @@ create_exception!(
     "Raised when awaiting a port that will deliver no more values."
 );
 
-static DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-static LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-
-/// A Python value carried by a port.
-pub(crate) struct PyValue(Py<PyAny>);
-
-/// Serializes port values with Python's pickle.
-struct Pickle;
-
-impl Serializer<PyValue> for Pickle {
-    fn name(&self) -> &str {
-        "pickle"
-    }
-
-    fn serialize(&self, value: &PyValue) -> Vec<u8> {
-        Python::attach(|py| {
-            let dumps = DUMPS.import(py, "pickle", "dumps").unwrap();
-            let data = dumps
-                .call1((value.0.bind(py), -1))
-                .unwrap_or_else(|error| panic!("cannot pickle a port value: {error}"));
-            data.cast::<PyBytes>().unwrap().as_bytes().to_vec()
-        })
-    }
-
-    fn deserialize(&self, bytes: &[u8]) -> PyValue {
-        Python::attach(|py| {
-            let loads = LOADS.import(py, "pickle", "loads").unwrap();
-            let value = loads
-                .call1((PyBytes::new(py, bytes),))
-                .unwrap_or_else(|error| panic!("cannot unpickle a port value: {error}"));
-            PyValue(value.unbind())
-        })
-    }
-}
-
-/// Serializes port values with a serializer written in Python.
-pub(crate) struct Custom {
-    pub(crate) name: String,
-    pub(crate) serializer: Py<PyAny>,
-}
-
-impl Serializer<PyValue> for Custom {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn serialize(&self, value: &PyValue) -> Vec<u8> {
-        Python::attach(|py| {
-            let serializer = self.serializer.bind(py);
-            let data = serializer
-                .call_method1("serialize", (value.0.bind(py),))
-                .unwrap_or_else(|error| panic!("{} cannot serialize a value: {error}", self.name));
-            let Ok(data) = data.cast::<PyBytes>() else {
-                panic!("{} must serialize a value to bytes, not {data}", self.name);
-            };
-            data.as_bytes().to_vec()
-        })
-    }
-
-    fn deserialize(&self, bytes: &[u8]) -> PyValue {
-        Python::attach(|py| {
-            let serializer = self.serializer.bind(py);
-            let value = serializer
-                .call_method1("deserialize", (PyBytes::new(py, bytes),))
-                .unwrap_or_else(|error| {
-                    panic!("{} cannot deserialize a value: {error}", self.name)
-                });
-            PyValue(value.unbind())
-        })
-    }
-}
-
-impl Payload for PyValue {
-    fn default_serializer() -> Rc<dyn Serializer<Self>> {
-        Rc::new(Pickle)
-    }
-}
-
 /// One port of a node, as raio-rs built it.
 pub(crate) enum Port {
     Input(InputPort<PyValue>),
@@ -107,25 +32,62 @@ pub(crate) enum Port {
     Action(Action<PyValue>),
 }
 
-/// The sending end of each open action of this process's node, by the action's position.
-pub(crate) static SENDERS: Mutex<BTreeMap<usize, ActionHandle<PyValue>>> =
-    Mutex::new(BTreeMap::new());
+/// The latest value of an input or an action, and its timestamp.
+type Latest<'a> = Option<(Ref<'a, PyValue>, Time)>;
 
-fn not_an(kind: &str, index: usize) -> PyErr {
-    PyTypeError::new_err(format!("port {index} of this node is not an {kind}"))
+/// What Python reads values from: an input port or an action.
+pub(crate) trait Source {
+    fn get(&self) -> Option<Ref<'_, PyValue>>;
+    fn latest(&self) -> Latest<'_>;
+    fn closed(&self) -> bool;
+    fn wait(&self) -> Pin<Box<dyn Future<Output = Latest<'_>> + '_>>;
+    fn trigger(&self) -> Trigger<'_>;
 }
 
-/// Set the value an output sends when the current tag completes.
+/// Read a raio type as a `Source` through the methods of the same names that it has.
+macro_rules! source {
+    ($type:ty) => {
+        impl Source for $type {
+            fn get(&self) -> Option<Ref<'_, PyValue>> {
+                <$type>::get(self)
+            }
+
+            fn latest(&self) -> Latest<'_> {
+                <$type>::latest(self)
+            }
+
+            fn closed(&self) -> bool {
+                <$type>::closed(self)
+            }
+
+            fn wait(&self) -> Pin<Box<dyn Future<Output = Latest<'_>> + '_>> {
+                Box::pin(<$type>::wait(self))
+            }
+
+            fn trigger(&self) -> Trigger<'_> {
+                <$type>::trigger(self)
+            }
+        }
+    };
+}
+
+source!(InputPort<PyValue>);
+source!(Action<PyValue>);
+
+/// The sending end of each open action of this process's node, by the action's position.
+/// Any thread may send to an action, so the senders are not kept with the node's thread.
+pub(crate) static ACTION_SENDERS: Mutex<BTreeMap<usize, ActionHandle<PyValue>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Set the value an output sends when the current timestamp completes.
 #[pyfunction]
 fn output_set(index: usize, value: Py<PyAny>) -> PyResult<()> {
     let running = running()?;
-    let Some(Port::Output(output)) = running.ports.get(index) else {
-        return Err(not_an("output", index));
-    };
-    if running.node.tag_complete() {
+    let output = running.output(index)?;
+    if running.node.timestamp_complete() {
         return Err(PyRuntimeError::new_err(format!(
-            "output set at {}, a tag the node already completed; \
-             tag 0 completes at startup, so wait first",
+            "output set at {}, a timestamp the node already completed; \
+             timestamp 0 completes at startup, so wait first",
             running.node.now()
         )));
     }
@@ -133,14 +95,10 @@ fn output_set(index: usize, value: Py<PyAny>) -> PyResult<()> {
     Ok(())
 }
 
-/// Clear the value set on an output at the current tag.
+/// Clear the value set on an output at the current timestamp.
 #[pyfunction]
 fn output_reset(index: usize) -> PyResult<()> {
-    let running = running()?;
-    let Some(Port::Output(output)) = running.ports.get(index) else {
-        return Err(not_an("output", index));
-    };
-    output.reset();
+    running()?.output(index)?.reset();
     Ok(())
 }
 
@@ -152,15 +110,17 @@ fn input_value(py: Python<'_>, index: usize) -> PyResult<Option<Py<PyAny>>> {
     Ok(latest.map(|(value, _)| value.0.clone_ref(py)))
 }
 
-/// The tag of the latest value of an input, or NEVER before the first one.
+/// The timestamp of the latest value of an input, or NEVER before the first one.
 #[pyfunction]
 fn input_time(index: usize) -> PyResult<PyTime> {
     let running = running()?;
     let latest = running.input(index)?.latest();
-    Ok(PyTime(latest.map_or(Time::NEVER, |(_, tag)| tag)))
+    Ok(PyTime(
+        latest.map_or(Time::NEVER, |(_, timestamp)| timestamp),
+    ))
 }
 
-/// True if a value arrived on an input at the current tag.
+/// True if a value arrived on an input at the current timestamp.
 #[pyfunction]
 fn input_present(index: usize) -> PyResult<bool> {
     Ok(running()?.input(index)?.get().is_some())
@@ -172,11 +132,10 @@ fn input_closed(index: usize) -> PyResult<bool> {
     Ok(running()?.input(index)?.closed())
 }
 
-/// Wait for the next value of an input after the current tag.
+/// Wait for the next value of an input after the current timestamp.
 #[pyfunction]
 fn input_wait(index: usize, label: String, iterating: bool) -> PyResult<Awaitable> {
     let running = running()?;
-    running.input(index)?;
     Ok(Awaitable::new(async move {
         let received = running.input(index)?.wait().await;
         Python::attach(|py| match received {
@@ -187,10 +146,24 @@ fn input_wait(index: usize, label: String, iterating: bool) -> PyResult<Awaitabl
     }))
 }
 
-/// Deliver a value to an action at a fresh physical tag; any thread may call this.
+/// Wait for the next timestamp at which one of these inputs has a value; return False once all of
+/// them have closed.
+#[pyfunction]
+fn next_event(indices: Vec<usize>) -> PyResult<Awaitable> {
+    let running = running()?;
+    Ok(Awaitable::new(async move {
+        let triggers = indices
+            .iter()
+            .map(|index| Ok(running.input(*index)?.trigger()));
+        let fired = raio::app::next_event(triggers.collect::<PyResult<_>>()?).await;
+        Python::attach(|py| Ok(fired.into_pyobject(py)?.to_owned().into_any().unbind()))
+    }))
+}
+
+/// Deliver a value to an action at a fresh physical timestamp; any thread may call this.
 #[pyfunction]
 fn action_send(index: usize, label: String, value: Py<PyAny>) -> PyResult<()> {
-    match SENDERS.lock().unwrap().get(&index) {
+    match ACTION_SENDERS.lock().unwrap().get(&index) {
         Some(sender) => {
             sender.send(PyValue(value));
             Ok(())
@@ -202,10 +175,9 @@ fn action_send(index: usize, label: String, value: Py<PyAny>) -> PyResult<()> {
 /// End an action after the values already sent; any thread may call this.
 #[pyfunction]
 fn action_close(index: usize) {
-    SENDERS.lock().unwrap().remove(&index); // Dropping the only sender closes the action.
+    ACTION_SENDERS.lock().unwrap().remove(&index); // Dropping the only sender closes the action.
 }
 
-/// Add this module's exception and functions to the Python module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Closed", module.py().get_type::<Closed>())?;
     module.add_function(wrap_pyfunction!(output_set, module)?)?;
@@ -215,6 +187,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(input_present, module)?)?;
     module.add_function(wrap_pyfunction!(input_closed, module)?)?;
     module.add_function(wrap_pyfunction!(input_wait, module)?)?;
+    module.add_function(wrap_pyfunction!(next_event, module)?)?;
     module.add_function(wrap_pyfunction!(action_send, module)?)?;
     module.add_function(wrap_pyfunction!(action_close, module)?)?;
     Ok(())

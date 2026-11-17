@@ -5,7 +5,7 @@ use std::task::Poll;
 /// Finishes with true when its input has a value, or with false once the input has closed.
 pub type Trigger<'a> = Pin<Box<dyn Future<Output = bool> + 'a>>;
 
-/// Wait for the next tag at which a trigger has a value; return false once all have closed.
+/// Wait for the next timestamp at which a trigger has a value; return false once all have closed.
 pub async fn next_event(triggers: Vec<Trigger<'_>>) -> bool {
     let mut triggers: Vec<_> = triggers.into_iter().map(Some).collect();
     poll_fn(|cx| {
@@ -27,12 +27,12 @@ pub async fn next_event(triggers: Vec<Trigger<'_>>) -> bool {
     .await
 }
 
-/// Run the body once per tag at which any of the ports has a value, until all have closed.
+/// Run the body once per timestamp at which any of the ports has a value, until all have closed.
 #[macro_export]
 macro_rules! reaction {
     ($self:ident, [$($port:ident),+ $(,)?], $body:block) => {{
         // A closed port stays closed, so every round may wait for all of the ports again.
-        while $crate::reaction::next_event(vec![$($self.$port.trigger()),+]).await {
+        while $crate::app::next_event(vec![$($self.$port.trigger()),+]).await {
             $body
         }
     }};
@@ -44,8 +44,7 @@ mod tests {
     use std::rc::Rc;
 
     use crate::app::InputPort;
-    use crate::node::{ExecutionMode, NodeScheduler};
-    use crate::runtime::Runtime;
+    use crate::node::NodeScheduler;
     use crate::time::{MS, NS, Time};
 
     struct Merge {
@@ -53,14 +52,12 @@ mod tests {
         right: InputPort<i64>,
     }
 
-    /// The tag of each run of a reaction, with the values that its inputs had at that tag.
+    /// The timestamp of each run of a reaction, with the values that its inputs had then.
     type Runs = Rc<RefCell<Vec<(Time, Option<i64>, Option<i64>)>>>;
 
     /// Spawn a reaction to both inputs of a node on a FastForward scheduler.
     fn react() -> (Rc<NodeScheduler>, Rc<Merge>, Runs) {
-        let runtime = Rc::new(Runtime::new());
-        let mode = ExecutionMode::FastForward;
-        let scheduler = Rc::new(NodeScheduler::with_execution_mode(runtime, mode));
+        let scheduler = NodeScheduler::fast_forward();
         let (left, _) = InputPort::local(&scheduler);
         let (right, _) = InputPort::local(&scheduler);
         let merge = Rc::new(Merge { left, right });
@@ -79,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reaction_runs_once_per_tag_at_which_any_port_has_a_value() {
+    fn a_reaction_runs_once_per_timestamp_at_which_any_port_has_a_value() {
         let (scheduler, merge, runs) = react();
         let (left, right) = (&merge.left.channel, &merge.right.channel);
         left.push(1 * MS, 1);

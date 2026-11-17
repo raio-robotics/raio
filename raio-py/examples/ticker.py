@@ -12,5 +12,5 @@ class Ticker(Node):
     @task
     async def tick(self):
         for i in range(self.ticks):
-            await raio.sleep(self.period)
+            await raio.wait(self.period)
             self.out.set(i)

@@ -1,18 +1,19 @@
+//! The coordinator of an app, which the launching Python process starts on a thread.
+
 use std::collections::HashMap;
 use std::thread::JoinHandle;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use raio::app::{Connection, Graph, PortId};
-use raio::coordinator::Interrupt;
+use raio::coordinator::{Connection, CoordinatorHandle, Failure, Graph, PortId};
 use raio::time::Time;
 
 /// The coordinator of an app, running on its own thread.
 #[pyclass(module = "raio")]
 struct Coordinator {
     endpoint: String,
-    thread: Option<JoinHandle<Result<(), String>>>,
-    interrupt: Interrupt,
+    thread: Option<JoinHandle<Result<(), Failure>>>,
+    handle: CoordinatorHandle,
 }
 
 #[pymethods]
@@ -23,7 +24,7 @@ impl Coordinator {
         &self.endpoint
     }
 
-    /// True once the coordinator has refused the graph or every node has disconnected.
+    /// True once the coordinator has ended the app.
     fn finished(&self) -> bool {
         self.thread
             .as_ref()
@@ -32,30 +33,44 @@ impl Coordinator {
 
     /// Have every node of the app shut down at once; the launcher calls this on ^C.
     fn shutdown_now(&self) {
-        self.interrupt.shutdown_now();
+        self.handle.shutdown_now();
     }
 
-    /// Wait until every node has disconnected; raise if the coordinator refused the graph.
-    fn join(&mut self, py: Python<'_>) -> PyResult<()> {
+    /// Report that the process of a node has exited. A node that failed ends the app.
+    fn node_exited(&self, node_id: usize, success: bool) {
+        self.handle.node_exited(node_id, success);
+    }
+
+    /// Wait until the coordinator has ended the app; raise if it refused the graph.
+    ///
+    /// Return the nodes that failed, the first of them first, and those of them that went
+    /// silent, whose processes may still run.
+    fn join(&mut self, py: Python<'_>) -> PyResult<(Vec<usize>, Vec<usize>)> {
         let Some(thread) = self.thread.take() else {
-            return Ok(());
+            return Ok((Vec::new(), Vec::new()));
         };
         match py.detach(move || thread.join()) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(refusal)) => Err(PyValueError::new_err(refusal)),
+            Ok(Ok(())) => Ok((Vec::new(), Vec::new())),
+            Ok(Err(Failure::Nodes { failed, silent })) => Ok((failed, silent)),
+            Ok(Err(Failure::Refused(refusal))) => Err(PyValueError::new_err(refusal)),
             Err(_) => Err(PyRuntimeError::new_err("the coordinator failed")),
         }
     }
 }
 
-/// One connection: source node and port, target node and port, delay in nanoseconds.
-type Edge = (usize, usize, usize, usize, i64);
+/// A connection as Python gives it: source node and port, target node and port, and the
+/// delay in nanoseconds.
+type PyConnection = (usize, usize, usize, usize, i64);
 
 /// Start the coordinator of an app with this many nodes and these connections.
 ///
 /// `code` maps a node's id to what the node gets when it asks the coordinator for its code.
 #[pyfunction]
-fn coordinator(nodes: usize, connections: Vec<Edge>, code: HashMap<usize, Vec<u8>>) -> Coordinator {
+fn coordinator(
+    nodes: usize,
+    connections: Vec<PyConnection>,
+    code: HashMap<usize, Vec<u8>>,
+) -> Coordinator {
     let port = |node_id, port_id| PortId { node_id, port_id };
     let connections = connections
         .into_iter()
@@ -68,15 +83,14 @@ fn coordinator(nodes: usize, connections: Vec<Edge>, code: HashMap<usize, Vec<u8
         )
         .collect();
     let graph = Graph { nodes, connections };
-    let (endpoint, thread, interrupt) = raio::coordinator::spawn(graph, code);
+    let (endpoint, thread, handle) = raio::coordinator::spawn(graph, code);
     Coordinator {
         endpoint,
         thread: Some(thread),
-        interrupt,
+        handle,
     }
 }
 
-/// Add this module's class and function to the Python module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Coordinator>()?;
     module.add_function(wrap_pyfunction!(coordinator, module)?)?;

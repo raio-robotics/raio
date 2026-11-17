@@ -1,23 +1,27 @@
+//! The building blocks of a node program: the ports, actions and reactions of a node, and the
+//! `App` that connects nodes and launches them.
+
+mod action;
 mod builder;
 mod connection;
-pub(crate) mod graph;
 mod interrupt;
+mod launch;
 mod port;
+mod reaction;
 mod run;
 mod setting;
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
-pub use crate::action::{Action, ActionHandle};
-use crate::coordinator::{self, Link};
+use crate::coordinator::{Connection, Graph, Link};
 pub use crate::node::{ExecutionMode, Node};
 use crate::serializer::Serializer;
 use crate::time::Time;
 use crate::transport::{AnyTransport, Transport};
+pub use action::{Action, ActionHandle};
 pub use builder::Builder;
-pub use graph::{Connection, Graph};
-pub use port::{InputPort, OutputPort, PortId};
+pub use port::{InputPort, OutputPort};
+pub use reaction::{Trigger, next_event};
 use run::Runner;
 pub use run::{Assignment, CreatedNode, Start, create_node, run_node, run_node_as, run_node_on};
 
@@ -41,7 +45,7 @@ impl App {
     ) -> ConnectionOptions<'a, T> {
         self.connections.push(Connection {
             from: from.channel.setting.id,
-            to: to.channel.setting.id,
+            to: to.setting.id,
             delay: Time::ZERO,
         });
         ConnectionOptions {
@@ -55,9 +59,9 @@ impl App {
     pub fn create_node<N: 'static>(
         &mut self,
         constructor: impl FnOnce(&mut Builder) -> N,
-        starts: Vec<Start<N>>,
+        tasks: Vec<Start<N>>,
     ) -> CreatedNode<N> {
-        let created = CreatedNode::new(self.nodes.len(), constructor, starts);
+        let created = CreatedNode::new(self.nodes.len(), constructor, tasks);
         self.nodes.push(created.runner.clone());
         created
     }
@@ -67,51 +71,14 @@ impl App {
         match Assignment::from_args() {
             Some(assignment) => {
                 interrupt::ignore_interrupt();
-                self.nodes[assignment.node_id].run(Link::open(assignment))
+                let link = Link::open(assignment.node_id, &assignment.coordinator_endpoint);
+                self.nodes[assignment.node_id].run(link)
             }
-            None => launch(Graph {
+            None => launch::launch(Graph {
                 nodes: self.nodes.len(),
                 connections: self.connections,
             }),
         }
-    }
-}
-
-/// Start this program once for each node and wire the nodes through a coordinator.
-fn launch(graph: Graph) {
-    let exe = std::env::current_exe().unwrap();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let nodes = graph.nodes;
-    // Every node is this program, so the coordinator holds no code for them.
-    let (endpoint, coordinator, interrupt) = coordinator::spawn(graph, HashMap::new());
-    // On ^C every node runs its shutdown function at once, and the app ends as it otherwise does.
-    interrupt::on_interrupt(move || interrupt.shutdown_now());
-    let children: Vec<_> = (0..nodes)
-        .map(|node_id| {
-            let assignment = Assignment {
-                node_id,
-                coordinator_endpoint: endpoint.clone(),
-            };
-            // The program's own arguments keep their positions.
-            std::process::Command::new(&exe)
-                .args(&args)
-                .args(assignment.args())
-                .spawn()
-                .unwrap()
-        })
-        .collect();
-    let wired = coordinator
-        .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-    for mut child in children {
-        let status = child.wait().unwrap();
-        assert!(
-            wired.is_err() || status.success(),
-            "node exited with {status} status"
-        );
-    }
-    if let Err(refusal) = wired {
-        panic!("{refusal}");
     }
 }
 
@@ -123,7 +90,7 @@ pub struct ConnectionOptions<'a, T> {
 }
 
 impl<T> ConnectionOptions<'_, T> {
-    /// Deliver each value at its tag plus this delay.
+    /// Deliver each value at its timestamp plus this delay.
     pub fn delay(self, delay: Time) -> Self {
         self.connection.delay = delay;
         self
@@ -134,7 +101,7 @@ impl<T> ConnectionOptions<'_, T> {
         let serializer: Rc<dyn Serializer<T>> = Rc::new(serializer);
         let name = serializer.name().to_string();
         // The output keeps what its other connections use; the input has only this connection.
-        let (output, input) = (&self.from.channel.setting, &self.to.channel.setting);
+        let (output, input) = (&self.from.channel.setting, &self.to.setting);
         output.serializers.add(name.clone(), serializer.clone());
         input.serializers.set(name, serializer);
         self
@@ -144,7 +111,7 @@ impl<T> ConnectionOptions<'_, T> {
     pub fn transport(self, transport: impl Transport + 'static) -> Self {
         let transport: Rc<dyn AnyTransport> = Rc::new(transport);
         let name = transport.name().to_string();
-        let (output, input) = (&self.from.channel.setting, &self.to.channel.setting);
+        let (output, input) = (&self.from.channel.setting, &self.to.setting);
         output.transports.add(name.clone(), transport.clone());
         input.transports.set(name, transport);
         self
@@ -202,7 +169,7 @@ mod tests {
         let output = out.channel.setting.describe();
         assert_eq!(output.serializers, ["bincode", decimal]);
         assert_eq!(output.transports, ["tcp", loopback]);
-        assert_eq!(input.channel.setting.serializers.names(), [decimal]);
-        assert_eq!(input.channel.setting.transports.names(), [loopback]);
+        assert_eq!(input.setting.serializers.names(), [decimal]);
+        assert_eq!(input.setting.transports.names(), [loopback]);
     }
 }

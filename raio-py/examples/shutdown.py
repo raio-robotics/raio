@@ -9,10 +9,10 @@ class Ticker(Node):
     async def tick(self):
         count = 0
         while True:
-            await raio.sleep(1 * MS)
+            await raio.wait(1 * MS)
             self.out.set(count)
             if count == 3:
-                # Every node of the app shuts down at one tag.
+                # Every node of the app shuts down at one timestamp.
                 raio.request_shutdown()
             count += 1
 

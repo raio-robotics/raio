@@ -1,9 +1,15 @@
-"""raio: deterministic realtime nodes on async/await."""
+"""raio: deterministic realtime nodes on async/await.
 
-from ._py.app import MessagePack, Serializer, connect, run
+A node declares its ports on its class and its work as `@task` and `@reaction` methods.
+`raio.connect` joins an output port to an input port, and `raio.run` runs each node in its own
+process until all of them finish.
+"""
+
+from ._py.app import connect, run
 from ._py.combinators import timeout
 from ._py.node import Node, RustNode, reaction, task
 from ._py.ports import Action, InputPort, OutputPort
+from ._py.serializers import MessagePack, Serializer
 from ._rs.core import (
     HOUR,
     MINUTE,
@@ -22,8 +28,8 @@ from ._rs.core import (
     request_shutdown,
     request_shutdown_after,
     select,
-    sleep,
     spawn,
+    wait,
 )
 
 __all__ = [
@@ -31,5 +37,5 @@ __all__ = [
     "Task", "Time",
     "NS", "US", "MS", "S", "SECOND", "MINUTE", "HOUR",
     "connect", "gather", "is_physical", "now", "physical_now", "reaction", "request_shutdown",
-    "request_shutdown_after", "run", "select", "sleep", "spawn", "task", "timeout",
+    "request_shutdown_after", "run", "select", "spawn", "task", "timeout", "wait",
 ]  # fmt: skip

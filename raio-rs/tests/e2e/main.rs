@@ -1,17 +1,26 @@
 mod tests;
 
-use raio::app::{
-    Assignment, Builder, Connection, Graph, InputPort, PortId, create_node, run_node_as,
-};
-use raio::coordinator::spawn;
+use raio::app::{Assignment, Builder, InputPort, create_node, run_node_as};
+use raio::coordinator::{Connection, Failure, Graph, PortId, spawn};
 use raio::tasks;
 use raio::time::Time;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::rc::Rc;
+
+/// The program that cargo built from an example.
+fn example(name: &str) -> PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    path.pop();
+    path.push("examples");
+    path.push(name);
+    path
+}
 
 fn run_example(name: &str) -> String {
     run_example_with_input(name, "")
@@ -19,12 +28,7 @@ fn run_example(name: &str) -> String {
 
 /// Run an example process and supply its stdin from `input`.
 fn run_example_with_input(name: &str, input: &str) -> String {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    path.pop();
-    path.push("examples");
-    path.push(name);
-    let mut child = Command::new(&path)
+    let mut child = Command::new(example(name))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -133,8 +137,8 @@ fn reaction_order() {
 }
 
 #[test]
-fn same_tag() {
-    let stdout = run_example("same_tag");
+fn same_timestamp() {
+    let stdout = run_example("same_timestamp");
     assert_eq!(
         stdout,
         "worker sets 7 at 700ms\n\
@@ -163,7 +167,7 @@ fn foreign() {
         "start work at 1s (physical: false)\n\
          got 42 (physical: true)\n"
     );
-    // The foreign future must resume after the task's previous logical tag.
+    // The foreign future must resume after the task's previous logical timestamp.
     assert!(nanos(node_time.trim()) > 1_000_000_000, "{node_time}");
 }
 
@@ -212,13 +216,8 @@ fn shutdown() {
 
 #[test]
 fn interrupt() {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    path.pop();
-    path.push("examples");
-    path.push("interrupt");
     // The app gets a process group of its own, as it has in a terminal.
-    let mut app = Command::new(&path)
+    let mut app = Command::new(example("interrupt"))
         .process_group(0)
         .stdout(Stdio::piped())
         .spawn()
@@ -237,6 +236,34 @@ fn interrupt() {
     assert_eq!(rest, ["sink shut down", "ticker shut down"]);
 }
 
+#[test]
+fn failure() {
+    let output = Command::new(example("failure")).output().unwrap();
+    assert!(!output.status.success());
+    // The coordinator shut the ticker down, so its shutdown function ran.
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "sink got 0\nsink got 1\nticker shut down\n"
+    );
+    let errors = String::from_utf8(output.stderr).unwrap();
+    assert!(errors.contains("the sink cannot take 2"), "{errors}");
+    // The launcher names the node that failed, not one that then shut down.
+    assert!(errors.contains("node 1 exited with"), "{errors}");
+    assert!(!errors.contains("node 0"), "{errors}");
+}
+
+#[test]
+fn silent() {
+    let output = Command::new(example("silent")).output().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "ticker shut down\n"
+    );
+    let errors = String::from_utf8(output.stderr).unwrap();
+    assert!(errors.contains("node 1 stopped responding"), "{errors}");
+}
+
 /// Collects what the `node` example sends.
 struct Collector {
     input: InputPort<String>,
@@ -252,7 +279,11 @@ impl Collector {
 }
 
 /// The results of the coordinator, the `node` example, and the collector.
-type Launched = (Result<(), String>, Output, std::thread::Result<Vec<String>>);
+type Launched = (
+    Result<(), Failure>,
+    Output,
+    std::thread::Result<Vec<String>>,
+);
 
 /// Run the `node` example and an in-process collector, connected at the collector's `input` port.
 fn launch(input: usize) -> Launched {
@@ -280,12 +311,7 @@ fn launch(input: usize) -> Launched {
         coordinator_endpoint: coordinator_endpoint.clone(),
     };
 
-    let mut program = std::env::current_exe().unwrap();
-    program.pop();
-    program.pop();
-    program.push("examples");
-    program.push("node");
-    let example = Command::new(program)
+    let example = Command::new(example("node"))
         .arg("hello world")
         .args(assign(0).args())
         .stdout(Stdio::piped())
@@ -326,7 +352,7 @@ fn a_node_in_its_own_program_is_wired_by_port_position() {
 fn a_graph_that_names_a_missing_port_stops_every_node() {
     let (wired, example, collected) = launch(3);
     let refusal = "node 1 has no input port 3";
-    assert_eq!(wired, Err(refusal.to_string()));
+    assert_eq!(wired, Err(Failure::Refused(refusal.to_string())));
     assert!(!example.status.success());
     assert!(String::from_utf8(example.stderr).unwrap().contains(refusal));
     let panic = collected.unwrap_err();

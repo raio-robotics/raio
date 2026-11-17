@@ -1,10 +1,15 @@
+//! The I/O driver: each thread has one, and it wakes tasks when their descriptors are ready
+//! or their timers are due.
+
 mod async_fd;
+mod timer;
 
 pub use async_fd::AsyncFd;
+pub use timer::Timer;
 
 use polling::{Event, Events, PollMode, Poller};
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, RawFd};
 use std::rc::Rc;
@@ -24,6 +29,8 @@ pub(crate) struct Driver {
     thread: ThreadId,    // Identifies the thread that owns this driver.
     entries: RefCell<HashMap<usize, Rc<RegEntry>>>, // Maps poller keys to descriptor registrations.
     events: RefCell<Events>, // Reuses the event buffer across waits.
+    timers: RefCell<BTreeMap<(Instant, usize), Waker>>, // Orders the pending timers by due time.
+    next_timer_id: Cell<usize>,
 }
 
 /// Allows another thread to interrupt the driver's blocking wait.
@@ -93,13 +100,14 @@ impl AsFd for RegEntry {
 }
 
 impl Driver {
-    /// Create a poller for the current thread.
     fn new() -> Self {
         Self {
             poller: Arc::new(Poller::new().expect("cannot create the I/O poller")),
             thread: std::thread::current().id(),
             entries: RefCell::new(HashMap::new()),
             events: RefCell::new(Events::new()),
+            timers: RefCell::new(BTreeMap::new()),
+            next_timer_id: Cell::new(0),
         }
     }
 
@@ -114,6 +122,10 @@ impl Driver {
             poller: driver.poller.clone(),
             thread: driver.thread,
         })
+    }
+
+    fn next_timer_id(&self) -> usize {
+        self.next_timer_id.replace(self.next_timer_id.get() + 1)
     }
 
     /// Register a descriptor with no initial read or write interest.
@@ -149,12 +161,14 @@ impl Driver {
         Ok(())
     }
 
-    /// Wait for I/O, an alarm, or a notification, then wake tasks with ready I/O.
+    /// Wait for I/O, an alarm, a timer, or a notification, then wake tasks with ready I/O
+    /// and the timers that are due.
     pub(crate) fn wait(&self, alarm_due: Option<Instant>) -> io::Result<()> {
         let mut events = self.events.borrow_mut();
         events.clear();
-        match alarm_due {
-            Some(alarm_due) => self.poller.wait_deadline(&mut events, alarm_due)?,
+        let timer_due = self.timers.borrow().keys().next().map(|(due, _)| *due);
+        match [alarm_due, timer_due].into_iter().flatten().min() {
+            Some(due) => self.poller.wait_deadline(&mut events, due)?,
             None => self.poller.wait(&mut events, None)?,
         };
         let entries = self.entries.borrow();
@@ -164,6 +178,10 @@ impl Driver {
             };
             entry.wake(&event);
             self.arm(entry)?;
+        }
+        let (mut timers, now) = (self.timers.borrow_mut(), Instant::now());
+        while let Some(timer) = timers.first_entry().filter(|timer| timer.key().0 <= now) {
+            timer.remove().wake();
         }
         Ok(())
     }

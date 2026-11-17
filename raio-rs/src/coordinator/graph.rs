@@ -1,9 +1,24 @@
-use std::collections::BTreeMap;
+//! The graph of an app, and the rules that its connections must follow.
 
-use super::port::PortId;
+use std::collections::BTreeMap;
+use std::fmt;
+
 use crate::messages::{Downstream, RegisterNode, Wiring};
 use crate::node::NodeId;
 use crate::time::Time;
+
+/// A port of a node, by its position among the ports the node built.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PortId {
+    pub node_id: NodeId,
+    pub port_id: usize,
+}
+
+impl fmt::Display for PortId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "port {} of node {}", self.port_id, self.node_id)
+    }
+}
 
 /// A connection from an output port to an input port.
 #[derive(Clone, Debug)]
@@ -16,6 +31,7 @@ pub struct Connection {
 /// The nodes of an app and the connections between their ports.
 #[derive(Clone, Debug)]
 pub struct Graph {
+    /// The number of nodes; a node's id is its position among them.
     pub nodes: usize,
     pub connections: Vec<Connection>,
 }

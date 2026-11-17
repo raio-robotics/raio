@@ -1,3 +1,6 @@
+//! ^C: a launcher catches it and tells the coordinator, which shuts the app down; a node
+//! ignores it.
+
 use std::io::Read;
 use std::os::fd::IntoRawFd;
 use std::os::unix::net::UnixStream;
@@ -12,7 +15,7 @@ extern "C" fn wake(_signal: libc::c_int) {
 }
 
 /// Call `handler` on a thread of its own each time the user presses ^C.
-pub(crate) fn on_interrupt(handler: impl Fn() + Send + 'static) {
+pub(super) fn on_interrupt(handler: impl Fn() + Send + 'static) {
     let (mut pressed, wake_end) = UnixStream::pair().expect("cannot create a socket pair");
     WAKE.store(wake_end.into_raw_fd(), Ordering::Relaxed);
     let wake = wake as extern "C" fn(libc::c_int);
@@ -26,7 +29,7 @@ pub(crate) fn on_interrupt(handler: impl Fn() + Send + 'static) {
 }
 
 /// Leave ^C to the launcher, which tells its nodes to shut down through the coordinator.
-pub(crate) fn ignore_interrupt() {
+pub(super) fn ignore_interrupt() {
     // SAFETY: Ignoring a signal has no preconditions.
     unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
 }

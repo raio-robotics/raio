@@ -17,7 +17,7 @@ class Stubborn(Node):
     @task
     async def main(self):
         print("started")
-        await raio.sleep(raio.HOUR)
+        await raio.wait(raio.HOUR)
 
     def shutdown(self):
         print("shutting down")

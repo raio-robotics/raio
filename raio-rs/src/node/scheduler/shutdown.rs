@@ -1,29 +1,32 @@
 use super::NodeScheduler;
 use crate::time::Time;
 
-/// How far a node is into its app's shutdown.
+/// The stage of its app's shutdown that a node is in.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum Stage {
     /// No shutdown is under way.
     Running,
-    /// The node offered this tag and stays before it until the coordinator names the shutdown tag.
+    /// The node offered this timestamp and stays before it until the coordinator names the
+    /// timestamp of the shutdown.
     Held(Time),
-    /// The node shuts down at this tag.
+    /// The node shuts down at this timestamp.
     At(Time),
-    /// The app was interrupted: the node shuts down as soon as its current tag is complete.
+    /// The app was interrupted: the node shuts down as soon as its current timestamp is complete.
     Now,
     /// The node has shut down; only frame transfer still runs.
     Done,
 }
 
 impl Stage {
-    /// Choose the node's next tag, given the earliest tag on its queue.
-    pub(super) fn next_tag(self, queued: Option<Time>) -> Option<Time> {
+    /// Choose the node's next timestamp, given the earliest timestamp on its queue.
+    pub(super) fn next_timestamp(self, queued: Option<Time>) -> Option<Time> {
         match self {
             Stage::Running => queued,
-            Stage::Held(offer) => queued.filter(|tag| *tag < offer),
-            // The shutdown tag follows every earlier event and replaces every later one.
-            Stage::At(shutdown) => Some(queued.map_or(shutdown, |tag| tag.min(shutdown))),
+            Stage::Held(offer) => queued.filter(|timestamp| *timestamp < offer),
+            // The shutdown timestamp follows every earlier event and replaces every later one.
+            Stage::At(shutdown) => {
+                Some(queued.map_or(shutdown, |timestamp| timestamp.min(shutdown)))
+            }
             Stage::Now | Stage::Done => None,
         }
     }
@@ -33,7 +36,8 @@ impl Stage {
 pub(super) type Request = Box<dyn Fn(Time)>;
 
 impl NodeScheduler {
-    /// Ask the coordinator to shut down every node `delay` after the latest of their current tags.
+    /// Ask the coordinator to shut down every node `delay` after the latest of their current
+    /// timestamps.
     pub(crate) fn request_shutdown(&self, delay: Time) {
         if self.shutdown.get() != Stage::Running {
             return; // A shutdown is already under way.
@@ -44,42 +48,43 @@ impl NodeScheduler {
         request.as_ref().expect("the node has no coordinator")(delay);
     }
 
-    /// Offer to shut down `delay` after the current tag, and stay before that tag until told.
+    /// Offer to shut down `delay` after the current timestamp, and stay before the offer until
+    /// told.
     pub(crate) fn offer_shutdown(&self, delay: Time) -> Time {
         let offer = self.now() + delay;
         self.shutdown.set(Stage::Held(offer));
         offer
     }
 
-    /// Shut down at this tag, which the coordinator chose for every node.
-    pub(crate) fn shut_down_at(&self, tag: Time) {
+    /// Shut down at this timestamp, which the coordinator chose for every node.
+    pub(crate) fn shut_down_at(&self, timestamp: Time) {
         assert!(
-            tag > self.now(),
-            "cannot shut down at {tag} from {}",
+            timestamp > self.now(),
+            "cannot shut down at {timestamp} from {}",
             self.now()
         );
-        self.shutdown.set(Stage::At(tag));
+        self.shutdown.set(Stage::At(timestamp));
     }
 
-    /// Shut down as soon as the current tag is complete, whatever the node has queued.
+    /// Shut down as soon as the current timestamp is complete, whatever the node has queued.
     pub(crate) fn shut_down_now(&self) {
         if self.shutdown.get() != Stage::Done {
             self.shutdown.set(Stage::Now);
         }
     }
 
-    /// Move to the shutdown tag and shut down there; no task runs at that tag or after it.
-    pub(super) fn stop(&self, tag: Time, physical: bool) {
-        self.now.set(tag);
-        self.tag_complete.set(false);
+    /// Move to the shutdown timestamp and finish there; no task runs at that timestamp or after it.
+    pub(super) fn finish_at(&self, timestamp: Time, physical: bool) {
+        self.now.set(timestamp);
+        self.timestamp_complete.set(false);
         self.physical.set(physical);
-        self.shut_down();
+        self.finish();
         self.shutdown.set(Stage::Done);
     }
 
     /// Run the shutdown function if it has not run, send any unsent final frame with
     /// ENT = FOREVER, then close the output sinks.
-    pub(super) fn shut_down(&self) {
+    pub(super) fn finish(&self) {
         let function = self.shutdown_function.borrow_mut().take();
         if let Some(function) = function {
             function();
@@ -98,33 +103,30 @@ mod tests {
 
     use super::super::testing::{FixedSource, RecordingSink, node_rig};
     use super::*;
-    use crate::node::{ExecutionMode, Node};
-    use crate::runtime::Runtime;
+    use crate::node::Node;
     use crate::time::{MS, S};
 
     #[test]
-    fn shutting_down_closes_each_drain() {
-        let scheduler =
-            NodeScheduler::with_execution_mode(Rc::new(Runtime::new()), ExecutionMode::FastForward);
+    fn finishing_closes_every_sink() {
+        let scheduler = NodeScheduler::fast_forward();
         let sink = RecordingSink::new();
         scheduler.add_sink(sink.clone());
-        scheduler.shut_down();
+        scheduler.finish();
         assert!(sink.closed.get());
     }
 
     #[test]
-    fn a_node_stays_before_the_tag_it_offered_until_the_shutdown_tag_is_named() {
-        let scheduler =
-            NodeScheduler::with_execution_mode(Rc::new(Runtime::new()), ExecutionMode::FastForward);
+    fn a_node_stays_before_the_timestamp_it_offered_until_the_shutdown_timestamp_is_named() {
+        let scheduler = NodeScheduler::fast_forward();
         let sink = RecordingSink::new();
         scheduler.add_sink(sink.clone());
         let source = FixedSource::new(1 * S, true);
         scheduler.add_source(source.clone());
 
-        // The node offers its current tag plus the delay.
+        // The node offers its current timestamp plus the delay.
         assert_eq!(scheduler.offer_shutdown(2 * S), 2 * S);
         assert!(scheduler.try_advance());
-        assert_eq!(scheduler.now(), 1 * S); // An event before the offered tag still runs.
+        assert_eq!(scheduler.now(), 1 * S); // An event before the offered timestamp still runs.
 
         source.ent.set(3 * S);
         source.ready.set(Some(3 * S));
@@ -133,7 +135,7 @@ mod tests {
 
         scheduler.shut_down_at(4 * S);
         assert!(scheduler.try_advance());
-        assert_eq!(scheduler.now(), 3 * S); // An event before the shutdown tag still runs.
+        assert_eq!(scheduler.now(), 3 * S); // An event before the shutdown timestamp still runs.
 
         source.ent.set(Time::FOREVER);
         source.ready.set(None);
@@ -144,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn a_node_that_finishes_on_its_own_runs_its_shutdown_function_at_its_last_tag() {
+    fn a_node_that_finishes_on_its_own_runs_its_shutdown_function_at_its_last_timestamp() {
         let (_runtime, scheduler, sink) = node_rig();
         let node = Node {
             scheduler: scheduler.clone(),
@@ -167,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_shutdown_function_runs_at_the_shutdown_tag() {
+    fn only_the_shutdown_function_runs_at_the_shutdown_timestamp() {
         let (_runtime, scheduler, sink) = node_rig();
         let node = Node {
             scheduler: scheduler.clone(),
@@ -181,11 +183,11 @@ mod tests {
 
         let out = woke.clone();
         scheduler.run_user(async move {
-            let tag = node.wait(3 * MS).await;
-            out.borrow_mut().push(tag);
-            // This wait ends at the shutdown tag, where the task no longer runs.
-            let tag = node.wait(2 * MS).await;
-            out.borrow_mut().push(tag);
+            let timestamp = node.wait(3 * MS).await;
+            out.borrow_mut().push(timestamp);
+            // This wait ends at the shutdown timestamp, where the task no longer runs.
+            let timestamp = node.wait(2 * MS).await;
+            out.borrow_mut().push(timestamp);
         });
         assert_eq!(*woke.borrow(), vec![3 * MS]);
         assert_eq!(stopped.get(), Some(5 * MS));
@@ -197,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn an_interrupted_node_shuts_down_at_once_at_a_physical_tag() {
+    fn an_interrupted_node_shuts_down_at_once_at_a_physical_timestamp() {
         let (_runtime, scheduler, sink) = node_rig();
         let node = Node {
             scheduler: scheduler.clone(),
@@ -216,20 +218,20 @@ mod tests {
 
         scheduler.shut_down_now();
         scheduler.run_until_idle();
-        // The node does not go on to the tag that its task waits for.
-        let (tag, physical) = stopped.get().unwrap();
-        assert!(tag > Time::ZERO && tag < 1 * S, "{tag}");
+        // The node does not go on to the timestamp that its task waits for.
+        let (timestamp, physical) = stopped.get().unwrap();
+        assert!(timestamp > Time::ZERO && timestamp < 1 * S, "{timestamp}");
         assert!(physical);
-        assert_eq!(*sink.sent.borrow(), vec![(tag, Time::FOREVER, true)]);
+        assert_eq!(*sink.sent.borrow(), vec![(timestamp, Time::FOREVER, true)]);
         assert!(sink.closed.get());
 
         scheduler.run_until_idle();
         assert!(!woke.get()); // No task runs after the shutdown.
-        assert_eq!(scheduler.now(), tag);
+        assert_eq!(scheduler.now(), timestamp);
     }
 
     #[test]
-    fn a_node_in_a_shutdown_keeps_its_outputs_open_until_the_shutdown_tag() {
+    fn a_node_in_a_shutdown_keeps_its_outputs_open_until_the_shutdown_timestamp() {
         let (_runtime, scheduler, sink) = node_rig();
         let requests = Rc::new(RefCell::new(Vec::new()));
         let sent = requests.clone();
@@ -250,11 +252,11 @@ mod tests {
         // The node's only task has finished, yet its outputs stay open.
         assert!(!sink.closed.get());
 
-        let tag = scheduler.offer_shutdown(delay);
-        assert_eq!(tag, (1 * MS).next_microstep());
-        scheduler.shut_down_at(tag);
+        let timestamp = scheduler.offer_shutdown(delay);
+        assert_eq!(timestamp, (1 * MS).next_microstep());
+        scheduler.shut_down_at(timestamp);
         scheduler.run_until_idle();
-        assert_eq!(scheduler.now(), tag);
+        assert_eq!(scheduler.now(), timestamp);
         assert!(sink.closed.get());
     }
 }

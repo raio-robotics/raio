@@ -1,6 +1,6 @@
 use crate::driver::AsyncFd;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
-use std::io::ErrorKind;
+use std::io::ErrorKind::{BrokenPipe, ConnectionReset};
 use std::net;
 
 use super::{Listener, Receiver, Sender, Transport};
@@ -16,10 +16,13 @@ pub struct TcpListener {
 fn split(stream: net::TcpStream) -> (TcpSender, TcpReceiver) {
     stream.set_nodelay(true).unwrap();
     stream.set_nonblocking(true).unwrap();
+    let peer = stream.peer_addr().unwrap();
     let stream = AsyncFd::new(stream).unwrap();
     (
         TcpSender {
             stream: stream.clone(),
+            peer,
+            peer_exited: false,
         },
         TcpReceiver { stream },
     )
@@ -70,14 +73,27 @@ impl Listener for TcpListener {
 
 pub struct TcpSender {
     stream: AsyncFd<net::TcpStream>,
+    peer: net::SocketAddr,
+    peer_exited: bool,
 }
 
 impl Sender for TcpSender {
     async fn send(&mut self, msg: &[u8]) {
-        // One write per message: a peer that has just exited still accepts it without an error.
+        if self.peer_exited {
+            return;
+        }
+        // One write per message, so that its length and its bytes leave together.
         let mut frame = u32::try_from(msg.len()).unwrap().to_le_bytes().to_vec();
         frame.extend_from_slice(msg);
-        self.stream.write_all(&frame).await.unwrap();
+        match self.stream.write_all(&frame).await {
+            // A peer that has exited takes no more messages; what is sent to it is dropped.
+            Err(error) if matches!(error.kind(), BrokenPipe | ConnectionReset) => {
+                self.peer_exited = true;
+                let peer = self.peer;
+                eprintln!("warning: the peer at {peer} has exited; messages to it are dropped");
+            }
+            written => written.unwrap(),
+        }
     }
 
     async fn call(&mut self, request: &[u8]) -> Vec<u8> {
@@ -103,7 +119,7 @@ async fn read_frame(stream: &mut AsyncFd<net::TcpStream>) -> Option<Vec<u8>> {
     let mut len = [0u8; 4];
     let n = match stream.read(&mut len[..1]).await {
         // A peer that exited with unread messages resets the connection.
-        Err(error) if error.kind() == ErrorKind::ConnectionReset => 0,
+        Err(error) if error.kind() == ConnectionReset => 0,
         read => read.unwrap(),
     };
     if n == 0 {
@@ -134,6 +150,22 @@ mod tests {
             drop(sender);
             // A closed peer yields None after all frames are read.
             assert_eq!(receiver.recv().await, None);
+        });
+    }
+
+    #[test]
+    fn a_message_to_a_peer_that_has_exited_is_dropped() {
+        Runtime::new().block_on(async {
+            let mut listener = TcpTransport.bind().await;
+            let endpoint = listener.endpoint().to_string();
+            let (mut sender, _receiver) = TcpTransport.connect(&endpoint).await;
+            drop(listener.accept().await); // The peer closes its end of the connection.
+            for _ in 0..3 {
+                sender.send(b"late").await;
+                // The peer's system answers the first message with a reset.
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(sender.peer_exited);
         });
     }
 

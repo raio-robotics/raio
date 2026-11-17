@@ -16,7 +16,7 @@ impl NodeScheduler {
             self.spawn(task);
         }
         self.run_until(|| {
-            // A node in a shutdown runs on until the shutdown tag.
+            // A node in a shutdown runs on until the shutdown timestamp.
             let finished = match self.shutdown.get() {
                 Stage::Running => self.user_tasks_finished(),
                 stage => stage == Stage::Done,
@@ -27,7 +27,7 @@ impl NodeScheduler {
         self.runtime.clear();
     }
 
-    /// Process task wakes and advance tags until idle and done.
+    /// Process task wakes and advance timestamps until idle and done.
     pub(super) fn run_until(&self, done: impl Fn() -> bool) {
         loop {
             if self.aborted.get() {
@@ -38,30 +38,33 @@ impl NodeScheduler {
                 continue;
             }
 
-            // Finish all runnable tasks before sending the current tag's frame.
-            // A node in an app's shutdown stays open until the shutdown tag.
+            // Every runnable task has run. A node whose tasks have all ended finishes here,
+            // unless its app is shutting down: then it stays open until the shutdown timestamp.
             if self.user_tasks_finished() && self.shutdown.get() == Stage::Running {
-                self.shut_down();
+                self.finish();
             }
 
-            // Finish the current tag by sending its output and the node's ENT promise.
+            // Finish the current timestamp by sending its output and the node's ENT promise.
             self.send_frame(|| self.ent());
 
             if self.shutdown.get() == Stage::Now {
-                // An interrupted node shuts down at a physical tag, ahead of all it has queued.
-                self.stop(self.mint_physical_tag(), true);
+                // An interrupted node shuts down at a physical timestamp, ahead of all it has
+                // queued.
+                self.finish_at(self.mint_physical_timestamp(), true);
                 continue;
             }
 
-            let next = self.next_safe_tag();
+            let next = self.next_safe_timestamp();
             if self.advance_if_due(next) {
+                // A node that never waits still has to hear its sockets and its timers.
+                self.runtime.poll_io();
                 continue;
             }
             if done() {
                 return;
             }
 
-            let alarm_due = next.and_then(|tag| self.due(tag));
+            let alarm_due = next.and_then(|timestamp| self.due(timestamp));
             if let Some((task, kind)) = self.runtime.wait_wake_until(alarm_due) {
                 self.handle_wake(task, kind);
             }
@@ -74,14 +77,14 @@ impl NodeScheduler {
             return; // Ignore stale wakes from tasks that already finished.
         }
         if self.shutdown.get() == Stage::Done && self.user_tasks.borrow().contains(&task) {
-            return; // Nothing but the shutdown function runs at or after the shutdown tag.
+            return; // Nothing but the shutdown function runs at or after the shutdown timestamp.
         }
         match kind {
             WakeKind::Physical => self.defer(task),
             WakeKind::Resume => {
                 // Handle the case when a task is waiting on multiple futures. If any of these are physical, make the task physical.
                 if self.foreign.release(task) {
-                    // This task may observe its foreign result now, so mark this tag physical.
+                    // This task may observe its foreign result now, so the timestamp is physical.
                     self.physical.set(true);
                 }
                 self.runtime.poll(task);
@@ -89,11 +92,11 @@ impl NodeScheduler {
         }
     }
 
-    /// Assign a physical resumption tag to a task woken by a foreign future.
+    /// Assign a physical resumption timestamp to a task woken by a foreign future.
     pub(in crate::node) fn defer(&self, task: TaskId) {
         self.foreign.defer(task, || {
             (
-                self.mint_physical_tag(),
+                self.mint_physical_timestamp(),
                 self.runtime.waker_for(task, WakeKind::Resume),
             )
         });
@@ -113,6 +116,7 @@ mod tests {
     use super::super::testing::{Frames, node_rig};
     use super::*;
     use crate::app::{Builder, InputPort};
+    use crate::driver::Timer;
     use crate::node::{ExecutionMode, Node};
     use crate::runtime::Runtime;
     use crate::time::{MS, S, Time};
@@ -143,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_armed_at_a_physical_tag_elapses_physically() {
+    fn a_wait_armed_at_a_physical_timestamp_elapses_physically() {
         let (flags, frames) = wait_after(true);
         assert_eq!(flags, (true, true));
         // Both frames are physical and promise no further logical events.
@@ -154,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_armed_at_a_logical_tag_stays_logical() {
+    fn a_wait_armed_at_a_logical_timestamp_stays_logical() {
         let (flags, frames) = wait_after(false);
         assert_eq!(flags, (false, false));
         assert_eq!(
@@ -173,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_future_resumes_at_a_fresh_physical_tag() {
+    fn a_foreign_future_resumes_at_a_fresh_physical_timestamp() {
         let (_runtime, scheduler, sink) = node_rig();
         let node = Node {
             scheduler: scheduler.clone(),
@@ -183,7 +187,7 @@ mod tests {
         let seen = Rc::new(Cell::new(None));
         let (out, task_scheduler) = (seen.clone(), scheduler.clone());
         scheduler.run_user(async move {
-            // Begin at a logical tag before awaiting the foreign result.
+            // Begin at a logical timestamp before awaiting the foreign result.
             let started = node.wait(1 * MS).await;
             // The foreign future uses the task's default Physical waker.
             let value = result.await.unwrap();
@@ -199,7 +203,7 @@ mod tests {
         let (started, value, resumed, physical) = seen.get().unwrap();
         assert_eq!((started, value, physical), (1 * MS, 7, true));
         assert!(resumed > started);
-        // A foreign result creates a physical tag without lowering the logical ENT.
+        // A foreign result creates a physical timestamp without lowering the logical ENT.
         assert_eq!(
             *sink.sent.borrow(),
             vec![
@@ -248,11 +252,11 @@ mod tests {
     }
 
     #[test]
-    fn a_logical_event_reaching_a_deferred_task_makes_its_tag_physical() {
+    fn a_logical_event_reaching_a_deferred_task_makes_its_timestamp_physical() {
         let (runtime, scheduler, sink) = node_rig();
         let (port, channel) = InputPort::local(&scheduler);
         let (result, worker) = send_later(7);
-        // The later-arriving input has an earlier tag than the deferred foreign resumption.
+        // The later-arriving input has an earlier timestamp than the deferred foreign resumption.
         let (after, then) = oneshot::channel::<()>();
         let later = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(15));
@@ -267,7 +271,7 @@ mod tests {
         let seen = Rc::new(Cell::new(None));
         let (out, task_scheduler) = (seen.clone(), scheduler.clone());
         scheduler.run_user(async move {
-            let arrived = match select(port.pin(), result).await {
+            let arrived = match select(port.wait(), result).await {
                 Either::Left((value, _)) => *value.unwrap().0,
                 Either::Right(_) => unreachable!("the value is delivered first"),
             };
@@ -280,9 +284,9 @@ mod tests {
         worker.join().unwrap();
         later.join().unwrap();
 
-        // The task can observe its foreign result at the input's tag.
+        // The task can observe its foreign result at the input's timestamp.
         assert_eq!(seen.get(), Some((5, 1 * MS, true)));
-        // The input wake cancels the task's separate physical resumption tag.
+        // The input wake cancels the task's separate physical resumption timestamp.
         assert_eq!(*sink.sent.borrow(), vec![(1 * MS, Time::FOREVER, true)]);
         assert_eq!(scheduler.now(), 1 * MS);
     }
@@ -307,25 +311,25 @@ mod tests {
         let node = Node {
             scheduler: scheduler.clone(),
         };
-        let tags = Rc::new(RefCell::new(Vec::new()));
+        let timestamps = Rc::new(RefCell::new(Vec::new()));
         for _ in 0..2 {
-            let (tags, scheduler) = (tags.clone(), scheduler.clone());
+            let (timestamps, scheduler) = (timestamps.clone(), scheduler.clone());
             runtime.spawn_internal(async move {
-                tags.borrow_mut().push(scheduler.now());
-                yield_once().await; // A queued wake keeps the current tag open.
-                tags.borrow_mut().push(scheduler.now());
+                timestamps.borrow_mut().push(scheduler.now());
+                yield_once().await; // A queued wake keeps the current timestamp open.
+                timestamps.borrow_mut().push(scheduler.now());
             });
         }
         let woke_at = Rc::new(Cell::new(None));
         let out = woke_at.clone();
         scheduler.run_user(async move { out.set(Some(node.wait(1 * MS).await)) });
         // Every runnable task finished before logical time advanced.
-        assert_eq!(*tags.borrow(), vec![Time::ZERO; 4]);
+        assert_eq!(*timestamps.borrow(), vec![Time::ZERO; 4]);
         assert_eq!(woke_at.get(), Some(1 * MS));
     }
 
     #[test]
-    fn tasks_woken_at_one_tag_run_in_the_order_they_were_spawned() {
+    fn tasks_woken_at_one_timestamp_run_in_the_order_they_were_spawned() {
         let (_runtime, scheduler, _sink) = node_rig();
         let (first, first_channel) = InputPort::local(&scheduler);
         let (second, second_channel) = InputPort::local(&scheduler);
@@ -358,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn every_due_tag_is_completed_before_the_node_waits() {
+    fn every_due_timestamp_is_completed_before_the_node_waits() {
         let (_runtime, scheduler, sink) = node_rig();
         let (_port, channel) = InputPort::local(&scheduler);
         channel.push(1 * S, 1); // Delivery must advance time even when no task is waiting.
@@ -370,14 +374,38 @@ mod tests {
         });
         worker.join().unwrap();
 
-        // Both queued tags finish before the foreign result arrives.
+        // Both queued timestamps finish before the foreign result arrives.
         let frames = sink.sent.borrow();
         assert_eq!(
             frames[..2],
             [(1 * S, 2 * S, false), (2 * S, Time::FOREVER, false)]
         );
-        // The foreign result resumes after both queued tags.
+        // The foreign result resumes after both queued timestamps.
         assert!(frames[2].0 > 2 * S, "{}", frames[2].0);
+    }
+
+    #[test]
+    fn a_node_that_never_waits_still_fires_its_timers() {
+        let (runtime, scheduler, _sink) = node_rig();
+        let node = Node {
+            scheduler: scheduler.clone(),
+        };
+        let stop = scheduler.clone();
+        runtime.spawn_internal(async move {
+            Timer::after(Duration::from_millis(20)).await;
+            stop.shut_down_now();
+        });
+        let start = Instant::now();
+        scheduler.run_user(async move {
+            // In fast-forward mode the next timestamp is always due, so the node never waits.
+            while start.elapsed() < Duration::from_secs(10) {
+                node.wait(1 * MS).await;
+            }
+        });
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the timer never fired"
+        );
     }
 
     #[test]
@@ -398,7 +426,7 @@ mod tests {
         });
         scheduler.run(async move { finished.await.unwrap() }, Vec::new());
         worker.join().unwrap();
-        // Internal tasks resume without creating a new tag.
+        // Internal tasks resume without creating a new timestamp.
         assert_eq!(seen.get(), Some((7, Time::ZERO, false)));
     }
 
@@ -424,7 +452,7 @@ mod tests {
             .await;
             out.set(Some((task_scheduler.now(), task_scheduler.is_physical())));
         });
-        // Resume wakes poll at the current tag without physical deferral.
+        // Resume wakes poll at the current timestamp without physical deferral.
         assert_eq!(seen.get(), Some((Time::ZERO, false)));
     }
 
@@ -452,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn a_realtime_node_sleeps_until_the_tag() {
+    fn a_realtime_node_sleeps_until_the_timestamp() {
         let (_runtime, scheduler, _sink) = node_rig();
         scheduler.execution_mode.set(ExecutionMode::Realtime);
         let node = Node {
@@ -472,9 +500,9 @@ mod tests {
         let (_b, b_channel) = InputPort::local(&scheduler);
         // This input has no logical events but remains open.
         a_channel.update_remote_ent(Time::FOREVER);
-        // The result arrives after 5ms and gets a physical resumption tag.
+        // The result arrives after 5ms and gets a physical resumption timestamp.
         let (result, worker) = send_later(7);
-        // B arrives later in wall-clock time but has an earlier logical tag.
+        // B arrives later in wall-clock time but has an earlier logical timestamp.
         let (after, then) = oneshot::channel::<()>();
         let later = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(15));
@@ -489,7 +517,7 @@ mod tests {
         let seen = Rc::new(Cell::new(None));
         let (out, task_scheduler) = (seen.clone(), scheduler.clone());
         scheduler.run_user(async move {
-            let value = match select(a.pin(), result).await {
+            let value = match select(a.wait(), result).await {
                 Either::Left(_) => unreachable!("A never delivers"),
                 Either::Right((value, _)) => value.unwrap(),
             };
@@ -506,7 +534,7 @@ mod tests {
         assert_eq!((value, physical), (7, true));
         assert!(
             resumed_at > 3 * MS,
-            "resumed at {resumed_at}: B's tag, where nothing of A's arrived"
+            "resumed at {resumed_at}: B's timestamp, where nothing of A's arrived"
         );
     }
 
@@ -562,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn an_aborted_node_stops_without_completing_its_tag() {
+    fn an_aborted_node_stops_without_completing_its_timestamp() {
         let (_runtime, scheduler, sink) = node_rig();
         let node = Node {
             scheduler: scheduler.clone(),
@@ -575,7 +603,7 @@ mod tests {
         });
         scheduler.run_user(async move {
             node.wait(1 * MS).await;
-            assert!(!node.tag_complete());
+            assert!(!node.timestamp_complete());
             node.abort();
         });
         assert_eq!(scheduler.now(), 1 * MS);

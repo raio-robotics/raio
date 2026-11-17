@@ -6,7 +6,7 @@ import inspect
 
 from .._rs import core
 from . import states
-from .ports import InputPort, _Port
+from .ports import _Input, _Port
 from .utils import declared
 
 
@@ -19,9 +19,12 @@ def task(method):
 
 
 def reaction(*triggers):
-    """Run a method once per tag at which any trigger has a value."""
-    if not triggers or not all(isinstance(trigger, InputPort) for trigger in triggers):
-        raise TypeError("@reaction needs the input ports that trigger it")
+    """Run a method once per timestamp at which one of its triggers has a value.
+
+    A trigger is an input port or an action of the node.
+    """
+    if not triggers or not all(isinstance(trigger, _Input) for trigger in triggers):
+        raise TypeError("@reaction needs the input ports or actions that trigger it")
 
     def mark(method):
         method._raio_triggers = triggers
@@ -54,8 +57,8 @@ class Node(metaclass=_NodeMeta):
     def shutdown(self) -> None:
         """Run once when the node shuts down, with the app or on its own; override to use it.
 
-        When the app shuts down, this runs at the app's shutdown tag, where nothing else runs.
-        When the node finishes on its own, this runs at the node's last tag.
+        When the app shuts down, this runs at the app's shutdown timestamp, where nothing else runs.
+        When the node finishes on its own, this runs at the node's last timestamp.
         """
 
 
@@ -74,32 +77,14 @@ class RustNode(Node):
         raise NotImplementedError(f"{type(self).__name__} needs a start method")
 
 
-def _kinds(node):
-    """Name the kind of each port of a node, in order, for raio-rs."""
-    return [port._kind for port in node._ports]
-
-
-async def _arrives(port):
-    """Wait for the next value of a port; return False if the port closes instead."""
-    try:
-        await port
-    except core.Closed:
-        return False
-    return True
-
-
 async def _react(node, method, triggers):
-    """Call a reaction at each tag where a trigger has a value, until every trigger closes."""
+    """Call a reaction at each timestamp where a trigger has a value, until every trigger closes."""
     # The triggers are the declarations on the class; the node's own ports have their names.
-    waiting = [getattr(node, trigger._name) for trigger in triggers]
-    while waiting:
-        arrived = await core.select(*map(_arrives, waiting))
-        # A port that closed is waited for no longer; one that is absent has not finished.
-        waiting = [port for index, port in enumerate(waiting) if arrived.get(index, True)]
-        if any(arrived.values()):
-            result = method()
-            if inspect.isawaitable(result):
-                await result
+    positions = [getattr(node, trigger._name)._use() for trigger in triggers]
+    while await core.next_event(positions):
+        result = method()
+        if inspect.isawaitable(result):
+            await result
 
 
 def _start(node):

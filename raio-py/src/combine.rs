@@ -1,3 +1,5 @@
+//! Awaiting several things at once: `gather` and `select`.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -54,7 +56,7 @@ impl Future for Select {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Outcome> {
         let this = &mut *self;
-        // Every future is polled, so that the first to finish cannot hide another at its tag.
+        // Every future is polled, so that the first to finish cannot hide another at its timestamp.
         let outcomes: Vec<_> = this
             .futures
             .iter_mut()
@@ -114,7 +116,6 @@ fn select(
     Ok(Awaitable::new(Select { keys, futures }))
 }
 
-/// Add this module's functions to the Python module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(gather, module)?)?;
     module.add_function(wrap_pyfunction!(select, module)?)?;

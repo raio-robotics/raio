@@ -1,7 +1,7 @@
 import pytest
 import raio
 from raio import MS, US, InputPort, Node, OutputPort, reaction
-from test_app import Ticker
+from nodes import Ticker
 
 
 class Merge(Node):
@@ -14,7 +14,7 @@ class Merge(Node):
         print(f"{raio.now()}: {' and '.join(present)}")
 
 
-def test_a_reaction_runs_once_per_tag_at_which_any_trigger_has_a_value(capfd):
+def test_a_reaction_runs_once_per_timestamp_at_which_any_trigger_has_a_value(capfd):
     fast, slow, merge = Ticker(1 * MS, 4), Ticker(2 * MS, 2), Merge()
     raio.connect(fast.out, merge.left)
     raio.connect(slow.out, merge.right)
@@ -42,7 +42,7 @@ class Slow(Node):
     @reaction(inp)
     async def show(self):
         value = self.inp.value
-        print(f"{value} at {await raio.sleep(500 * US)}")
+        print(f"{value} at {await raio.wait(500 * US)}")
 
 
 def test_a_reaction_may_be_async(capfd):
@@ -75,7 +75,7 @@ def test_reactions_run_in_the_order_they_are_declared_whichever_port_triggers_th
     raio.connect(slow.out, order.b)
     raio.run(fast, slow, order)
     only_a, both = ["second", "third"], ["first", "second", "third"]
-    ran = [f"{tag}ms: {name}" for tag in (1, 2, 3, 4) for name in (only_a if tag % 2 else both)]
+    ran = [f"{ms}ms: {name}" for ms in (1, 2, 3, 4) for name in (only_a if ms % 2 else both)]
     assert capfd.readouterr().out.splitlines() == ran
 
 
@@ -95,11 +95,11 @@ def test_an_error_in_a_reaction_fails_the_app(capfd):
 
 
 def test_a_reaction_needs_the_input_ports_that_trigger_it():
-    with pytest.raises(TypeError, match="input ports that trigger it"):
+    with pytest.raises(TypeError, match="input ports or actions that trigger it"):
         reaction()
-    with pytest.raises(TypeError, match="input ports that trigger it"):
+    with pytest.raises(TypeError, match="input ports or actions that trigger it"):
         reaction(OutputPort[int]())
-    with pytest.raises(TypeError, match="input ports that trigger it"):
+    with pytest.raises(TypeError, match="input ports or actions that trigger it"):
 
         @reaction
         def show(self):

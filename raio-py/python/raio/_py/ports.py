@@ -35,10 +35,8 @@ class _Port(Generic[T]):
         return self._index
 
 
-class InputPort(_Port[T]):
-    """Receives the values of one connected output port."""
-
-    _kind = "input"  # the name by which raio-rs builds the port
+class _Input(_Port[T]):
+    """What a node's tasks read values from: an input port or an action."""
 
     @property
     def value(self) -> T | None:
@@ -47,12 +45,12 @@ class InputPort(_Port[T]):
 
     @property
     def time(self) -> Time:
-        """The tag of the latest value, or NEVER before the first one."""
+        """The timestamp of the latest value, or NEVER before the first one."""
         return core.input_time(self._use())
 
     @property
     def present(self) -> bool:
-        """True if a value arrived at the current tag."""
+        """True if a value arrived at the current timestamp."""
         return core.input_present(self._use())
 
     @property
@@ -61,24 +59,30 @@ class InputPort(_Port[T]):
         return core.input_closed(self._use())
 
     def __await__(self):
-        """Wait for the next value after the current tag."""
-        return core.input_wait(self._use(), repr(self), False)
+        """Wait for the next value after the current timestamp."""
+        return core.input_wait(self._use(), repr(self), iterating=False)
 
     def __aiter__(self):
         """Iterate over the values until the port closes."""
         return self
 
     def __anext__(self):
-        return core.input_wait(self._use(), repr(self), True)
+        return core.input_wait(self._use(), repr(self), iterating=True)
 
 
-class Action(InputPort[T]):
-    """Receives values sent from any thread as physical events."""
+class InputPort(_Input[T]):
+    """Receives the values of one connected output port."""
+
+    _kind = "input"  # the name by which raio-rs builds the port
+
+
+class Action(_Input[T]):
+    """Receives values sent from any thread as physical events; it takes no connection."""
 
     _kind = "action"
 
     def send(self, value: T) -> None:
-        """Deliver a value at a fresh physical tag."""
+        """Deliver a value at a fresh physical timestamp."""
         core.action_send(self._use(), repr(self), value)
 
     def close(self) -> None:
@@ -87,14 +91,14 @@ class Action(InputPort[T]):
 
 
 class OutputPort(_Port[T]):
-    """Sends at most one value per tag to every connected input port."""
+    """Sends at most one value per timestamp to every connected input port."""
 
     _kind = "output"
 
     def set(self, value: T) -> None:
-        """Set the value sent when the current tag completes."""
+        """Set the value sent when the current timestamp completes."""
         core.output_set(self._use(), value)
 
     def reset(self) -> None:
-        """Clear the value set at the current tag."""
+        """Clear the value set at the current timestamp."""
         core.output_reset(self._use())

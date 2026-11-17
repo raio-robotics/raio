@@ -14,7 +14,7 @@ class Worker(Node):
     @task
     async def produce(self):
         for i in range(4):
-            now = await raio.sleep(700 * MS)
+            now = await raio.wait(700 * MS)
             print(f"produce {i} at {now}")
 
 

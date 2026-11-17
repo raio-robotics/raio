@@ -1,3 +1,6 @@
+//! The bridge between Python's `await` and the node's runtime: a Rust future that Python can
+//! await, and a Python coroutine as a Rust future.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -142,7 +145,6 @@ pub(crate) fn to_future(awaitable: &Bound<'_, PyAny>) -> PyResult<PyFuture> {
     future.ok_or_else(|| PyRuntimeError::new_err("a raio awaitable can be awaited only once"))
 }
 
-/// Add this module's classes to the Python module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Awaitable>()
 }

@@ -3,7 +3,7 @@ use raio::tasks;
 use raio::time::{MS, S, Time};
 use std::rc::Rc;
 
-// Both tasks must finish before the node sends the tag's output.
+// Both tasks must finish before the node sends the timestamp's output.
 
 struct Ticker {
     node: Node,

@@ -1,7 +1,7 @@
 import pytest
 import raio
 from raio import MS, S, InputPort, Node, task
-from test_app import Ticker
+from nodes import Ticker
 
 
 def feed(sink, *tickers):
@@ -19,12 +19,12 @@ class Gather(Node):
     async def main(self):
         first, second = await raio.gather(self.a, self.b)
         print(raio.now(), first, second)
-        print(*await raio.gather(raio.sleep(2 * S), self.pause(), raio.sleep(1 * S)))
+        print(*await raio.gather(raio.wait(2 * S), self.pause(), raio.wait(1 * S)))
         print(await raio.gather())
 
     async def pause(self):
-        await raio.sleep(500 * MS)
-        return await raio.sleep(500 * MS)
+        await raio.wait(500 * MS)
+        return await raio.wait(500 * MS)
 
 
 def test_gather_returns_every_result_in_order_once_all_have_finished(capfd):
@@ -42,12 +42,12 @@ class Failing(Node):
 
     async def slow(self):
         try:
-            await raio.sleep(1 * raio.HOUR)
+            await raio.wait(1 * raio.HOUR)
         finally:
             print("slow is dropped")
 
     async def fail(self):
-        await raio.sleep(1 * MS)
+        await raio.wait(1 * MS)
         raise ValueError("broken")
 
 
@@ -64,12 +64,12 @@ class Select(Node):
     async def main(self):
         print(await raio.select(self.a, self.b))
         print(await raio.select(self.a, self.b))
-        match await raio.select(value=self.b, late=raio.sleep(10 * S)):
+        match await raio.select(value=self.b, late=raio.wait(10 * S)):
             case {"value": value}:
                 print("value", value, raio.now())
-        match await raio.select(value=self.b, late=raio.sleep(250 * MS)):
-            case {"late": tag}:
-                print("late", tag)
+        match await raio.select(value=self.b, late=raio.wait(250 * MS)):
+            case {"late": timestamp}:
+                print("late", timestamp)
         async for _ in self.a:
             pass
         try:
@@ -103,11 +103,11 @@ class Timeouts(Node):
         except TimeoutError:
             print(f"slow is dropped: {self.dropped} at {raio.now()}")
         print("value", await raio.timeout(10 * S, self.a), raio.now())
-        print("sleep", await raio.sleep(700 * MS))
+        print("wait", await raio.wait(700 * MS))
 
     async def slow(self):
         try:
-            await raio.sleep(1 * raio.HOUR)
+            await raio.wait(1 * raio.HOUR)
         finally:
             self.dropped = True
 
@@ -118,7 +118,7 @@ def test_timeout_raises_once_the_duration_has_passed_and_drops_what_it_awaited(c
         "no result within 250ms at 250ms",
         "slow is dropped: True at 750ms",
         "value 0 1s",
-        "sleep 1700ms",
+        "wait 1700ms",
     ]
 
 
@@ -137,7 +137,7 @@ class Spawner(Node):
         return 2 * (await self.a + 1)
 
     async def late(self):
-        print("late", await raio.sleep(1 * S))
+        print("late", await raio.wait(1 * S))
 
 
 def test_a_spawned_task_runs_on_its_own_and_gives_its_result_to_those_that_await_it(capfd):
@@ -158,7 +158,7 @@ def test_an_error_in_a_spawned_task_fails_the_app(capfd):
             print("never printed")
 
         async def fail(self):
-            await raio.sleep(1 * MS)
+            await raio.wait(1 * MS)
             raise ValueError("broken")
 
     with pytest.raises(RuntimeError, match=r"node 0 \(Faulty\) exited with status 1"):

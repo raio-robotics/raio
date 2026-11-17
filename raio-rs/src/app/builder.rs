@@ -5,10 +5,11 @@ use std::sync::Arc;
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 
+use super::action::{Action, Handles};
 use super::connection::{AnyInput, AnyOutput};
-use super::port::{InputChannel, InputPort, OutputChannel, OutputPort, PortId};
+use super::port::{InputChannel, InputPort, OutputChannel, OutputPort};
 use super::setting::PortSetting;
-use crate::action::{Action, Handles};
+use crate::coordinator::PortId;
 use crate::node::{ExecutionMode, Node, NodeId, NodeScheduler};
 use crate::runtime::BoxFuture;
 use crate::serializer::Payload;
@@ -23,7 +24,7 @@ pub struct Builder {
     pub(crate) inputs: Vec<Rc<dyn AnyInput>>,
     pub(crate) outputs: Vec<Rc<dyn AnyOutput>>,
     /// Internal tasks that forward action values into input channels.
-    pub(crate) tasks: Vec<BoxFuture<()>>,
+    pub(crate) internal_tasks: Vec<BoxFuture<()>>,
 }
 
 impl Builder {
@@ -34,40 +35,43 @@ impl Builder {
             scheduler,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            tasks: Vec::new(),
+            internal_tasks: Vec::new(),
         }
     }
 
+    /// Add an input port, which takes exactly one connection.
     pub fn input<T: Payload>(&mut self) -> InputPort<T> {
-        let setting = PortSetting::new(self.next_port_id());
-        let channel = Rc::new(InputChannel::with_setting(setting));
+        let channel = Rc::new(InputChannel::new());
+        let setting = Rc::new(PortSetting::new(self.next_port_id()));
         self.scheduler.add_source(channel.clone());
-        self.inputs.push(channel.clone());
+        self.inputs
+            .push(Rc::new((channel.clone(), setting.clone())));
         InputPort {
             channel,
+            setting,
             scheduler: self.scheduler.clone(),
         }
     }
 
+    /// Add an action, which the threads of this program feed.
     pub fn action<T: Send + 'static>(&mut self) -> Action<T> {
-        self.next_port_id(); // An action takes a position among the node's ports.
+        // An action takes a position among the node's ports, as it does where Python declares it.
+        self.next_port_id();
         let channel = Rc::new(InputChannel::new());
         // Action values are physical, so they do not limit ENT.
         channel.update_remote_ent(Time::FOREVER);
         self.scheduler.add_source(channel.clone());
         let (sender, mut receiver) = unbounded::<T>();
         let (action_channel, scheduler) = (channel.clone(), self.scheduler.clone());
-        self.tasks.push(Box::pin(async move {
+        self.internal_tasks.push(Box::pin(async move {
             while let Some(value) = receiver.next().await {
-                action_channel.push_physical(scheduler.mint_physical_tag(), value);
+                action_channel.push_physical(scheduler.mint_physical_timestamp(), value);
             }
             action_channel.close(); // Dropping the last producer handle closes the action.
         }));
         Action {
-            port: InputPort {
-                channel,
-                scheduler: self.scheduler.clone(),
-            },
+            channel,
+            scheduler: self.scheduler.clone(),
             handles: RefCell::new(Handles::Unused(Arc::new(sender))),
         }
     }
@@ -83,6 +87,7 @@ impl Builder {
         }
     }
 
+    /// Add an output port, which may feed any number of inputs.
     pub fn output<T: Payload>(&mut self) -> OutputPort<T> {
         let setting = PortSetting::new(self.next_port_id());
         let channel = Rc::new(OutputChannel::new(setting));

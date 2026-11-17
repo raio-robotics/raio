@@ -1,6 +1,6 @@
 import raio
 from raio import MS
-from test_app import Printer, Ticker, lines
+from nodes import Printer, Ticker, lines
 
 
 class Decimal:
