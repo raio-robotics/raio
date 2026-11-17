@@ -1,5 +1,6 @@
 use raio::runtime::Runtime;
-use raio::serializer::{SerdeSerializer, Serializer};
+use raio::serializer::Serializer;
+use raio::serializer::serde::SerdeSerializer;
 use raio::transport::tcp::TcpTransport;
 use raio::transport::{Receiver, Sender, Transport};
 

@@ -70,7 +70,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::Runtime;
-    use crate::serializer::SerdeSerializer;
+    use crate::serializer::serde::SerdeSerializer;
     use crate::transport::tcp::TcpTransport;
 
     fn port(node_id: usize, port_id: usize) -> PortId {
