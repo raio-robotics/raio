@@ -1,0 +1,15 @@
+[package]
+name = "raio-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A deterministic realtime async runtime"
+readme = "../README.md"
+keywords = ["async", "runtime", "deterministic", "realtime", "asyncio"]
+categories = ["asynchronous", "concurrency", "simulation", "realtime"]
+
+[lib]
+name = "raio"
+
+[dependencies]
