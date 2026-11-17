@@ -1,13 +1,26 @@
-use raio::executor::create_executor;
+use futures::join;
+use raio::runtime::Runtime;
 
 fn main() {
-    let (executor, spawner) = create_executor();
-    spawner.spawn(async {
+    let runtime = Runtime::new();
+
+    runtime.block_on(async {
         println!("Hello, world! 1");
     });
-    spawner.spawn(async {
+    runtime.spawn(async {
         println!("Hello, world! 2");
     });
-    drop(spawner);
-    executor.run();
+    runtime.spawn(async {
+        println!("Hello, world! 3");
+    });
+    runtime.block_on(async {
+        join!(
+            async {
+                println!("Hello, world! 4");
+            },
+            async {
+                println!("Hello, world! 5");
+            },
+        );
+    });
 }

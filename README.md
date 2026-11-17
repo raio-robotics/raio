@@ -24,7 +24,7 @@ maturin develop
 python -m pytest tests/
 ```
 
-### Publish package
+### Publish packasdfage
 
 #### Cargo
 ```bash
