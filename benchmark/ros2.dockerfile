@@ -14,7 +14,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --pr
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 COPY . /raio-src
-RUN pip install /raio-src/raio-py
+RUN pip install /raio-src/python
 
 WORKDIR /benchmark
 

@@ -9,7 +9,7 @@ benchmark/results/
 # Python
 **/__pycache__/
 **/.pytest_cache/
-raio-py/python/raio/_rs/
+python/python/raio/_rs/
 
 ## AI
 .claude/

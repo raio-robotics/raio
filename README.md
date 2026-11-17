@@ -13,7 +13,7 @@ keeps pace with the wall clock.
 
 A producer sends one value and a sink prints it.
 
-Rust (`raio-rs/examples/hello.rs`, run with `cargo run --example hello`):
+Rust (`core/examples/hello.rs`, run with `cargo run --example hello`):
 
 ```rust
 use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
@@ -69,7 +69,7 @@ fn main() {
 }
 ```
 
-Python (`raio-py/examples/hello.py`, run with `python examples/hello.py`):
+Python (`python/examples/hello.py`, run with `python examples/hello.py`):
 
 ```python
 import raio
@@ -98,7 +98,7 @@ raio.connect(producer.out, sink.inp)
 raio.run(producer, sink)
 ```
 
-More examples are in `raio-rs/examples` and `raio-py/examples`.
+More examples are in `core/examples` and `python/examples`.
 
 ## Concepts
 
@@ -214,13 +214,13 @@ class Scale(RustNode):
 ```
 
 A connection between a Python node and a Rust node uses MessagePack; the Rust node puts
-`MessagePackSerializer` on the ports concerned. See `raio-rs/examples/scale.rs` and
-`raio-py/examples/mixed.py`.
+`MessagePackSerializer` on the ports concerned. See `core/examples/scale.rs` and
+`python/examples/mixed.py`.
 
 ## Layout
 
 ```
-raio-rs/src
+core/src
   app/           what a node program is written with: App, ports, actions, reactions, connections
   node/          the scheduler that orders the events of one node by timestamp
   coordinator/   the graph of an app; wires its nodes at startup and shuts them down
@@ -230,7 +230,8 @@ raio-rs/src
   transport/     carrying bytes between processes
   runtime/       the single-threaded executor under each node
   driver/        its I/O and timers
-raio-py
+core/macros     the `Ports` derive macro, a separate crate as Rust requires of procedural macros
+python
   src/           the Rust half of the binding: Python coroutines run as raio tasks
   python/raio/   the Python half: Node, ports, connect, run
 ```
@@ -254,7 +255,7 @@ cargo test
 
 #### Python
 ```bash
-cd raio-py
+cd python
 maturin develop
 python -m pytest tests/
 ```
@@ -270,7 +271,7 @@ cargo publish -p raio-rs
 
 #### PyPI
 ```bash
-cd raio-py
+cd python
 maturin build --release
 uv publish ../target/wheels/*
 ```

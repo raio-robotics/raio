@@ -1,4 +1,4 @@
 .git/
 target/
-raio-py/python/raio/_rs/
+python/python/raio/_rs/
 benchmark/results/
