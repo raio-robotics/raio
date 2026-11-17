@@ -1,0 +1,21 @@
+[package]
+name = "raio-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A deterministic realtime async runtime"
+publish = false
+
+[lib]
+name = "raio_py"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+raio-rs = { path = "../raio-rs" }
+pyo3 = "0.29"
+
+[features]
+extension-module = ["pyo3/extension-module"]

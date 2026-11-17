@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["raio"]
-default-members = ["raio"]
+members = ["raio-rs", "raio-py"]
+default-members = ["raio-rs"]
 
 [workspace.package]
 version = "0.1.0"
