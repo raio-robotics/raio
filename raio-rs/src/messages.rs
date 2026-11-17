@@ -11,11 +11,12 @@ pub struct RegisterNode {
 
 pub type EndpointTable = HashMap<PortId, String>;
 
+/// An edge's output for one tag, including its ENT promise and optional serialized value.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct TaggedMessage {
+pub struct Frame {
     pub timestamp: Time,
     pub ent: Time,
-    /// Physical messsages are re-stamped by the receiver.
+    /// Physical frames may be retagged to keep them ahead of the receiver's logical clock.
     pub physical: bool,
     pub value: Option<Vec<u8>>,
 }

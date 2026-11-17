@@ -14,7 +14,7 @@ fn main() {
             loop {
                 let n = stream.read(&mut buf).await.unwrap();
                 if n == 0 {
-                    break; // EOF — peer hung up
+                    break; // The peer closed the connection.
                 }
                 println!("received data: {:?}", String::from_utf8_lossy(&buf[..n]));
                 stream.write_all(&buf[..n]).await.unwrap();

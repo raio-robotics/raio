@@ -13,9 +13,11 @@ categories = ["asynchronous", "concurrency", "simulation"]
 name = "raio"
 
 [dependencies]
-async-net = "2"
-async-io = "2"
 bincode = {version = "2", features = ["serde"]}
 futures = "0.3.34"
+polling = "3"
 serde = {version = "1.0", features = ["derive"]}
+
+[dev-dependencies]
+async-io = "2" # Supplies the external timer used by the foreign-future example.
 

@@ -5,7 +5,7 @@ fn run_example(name: &str) -> String {
     run_example_with_input(name, "")
 }
 
-/// Run an example with `input` on its stdin, which the node processes inherit.
+/// Run an example process and supply its stdin from `input`.
 fn run_example_with_input(name: &str, input: &str) -> String {
     let mut path = std::env::current_exe().unwrap();
     path.pop();
@@ -23,7 +23,7 @@ fn run_example_with_input(name: &str, input: &str) -> String {
         .take()
         .unwrap()
         .write_all(input.as_bytes())
-        .unwrap(); // dropped here: the readers see EOF after the input
+        .unwrap(); // Dropping the pipe signals EOF to the child process.
     let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
@@ -137,11 +137,11 @@ fn foreign() {
         "start work at 1s (physical: false)\n\
          got 42 (physical: true)\n"
     );
-    // The result came in on the wall clock: the node resumed at a tag after 1s.
+    // The foreign future must resume after the task's previous logical tag.
     assert!(nanos(node_time.trim()) > 1_000_000_000, "{node_time}");
 }
 
-/// Parse a `Time` as displayed: a number followed by one of its units.
+/// Parse a displayed time without microsteps into nanoseconds.
 fn nanos(time: &str) -> i64 {
     let digits = time.trim_end_matches(|c: char| c.is_ascii_alphabetic());
     let scale = match &time[digits.len()..] {

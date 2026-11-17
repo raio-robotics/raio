@@ -1,18 +1,18 @@
 use raio::runtime::Runtime;
 use raio::serializer::Serializer;
-use raio::serializer::serde::SerdeSerializer;
+use raio::serializer::bincode::BincodeSerializer;
 use raio::transport::tcp::TcpTransport;
 use raio::transport::{Receiver, Sender, Transport};
 
 #[test]
 fn typed_value_over_the_wire() {
     Runtime::new().block_on(async {
-        let mut transport = TcpTransport::new().await;
+        let mut transport = TcpTransport::bind().await;
         let endpoint = transport.endpoint().to_string();
         let (mut sender, _) = TcpTransport::connect(&endpoint).await;
         let (_, mut receiver) = transport.accept().await;
 
-        let serializer = SerdeSerializer;
+        let serializer = BincodeSerializer;
         let value: (i64, String, Vec<f32>) = (-7, "hello, port".to_string(), vec![1.5, -0.25]);
 
         sender.send(&serializer.serialize(&value)).await;
@@ -25,12 +25,12 @@ fn typed_value_over_the_wire() {
 #[test]
 fn mixed_types_share_one_connection_in_order() {
     Runtime::new().block_on(async {
-        let mut transport = TcpTransport::new().await;
+        let mut transport = TcpTransport::bind().await;
         let endpoint = transport.endpoint().to_string();
         let (mut sender, _) = TcpTransport::connect(&endpoint).await;
         let (_, mut receiver) = transport.accept().await;
 
-        let serializer = SerdeSerializer;
+        let serializer = BincodeSerializer;
         sender.send(&serializer.serialize(&42u64)).await;
         sender
             .send(&serializer.serialize(&String::from("between")))
@@ -49,12 +49,12 @@ fn mixed_types_share_one_connection_in_order() {
 #[test]
 fn close_after_last_message_yields_none() {
     Runtime::new().block_on(async {
-        let mut transport = TcpTransport::new().await;
+        let mut transport = TcpTransport::bind().await;
         let endpoint = transport.endpoint().to_string();
         let (mut sender, _) = TcpTransport::connect(&endpoint).await;
         let (_, mut receiver) = transport.accept().await;
 
-        let serializer = SerdeSerializer;
+        let serializer = BincodeSerializer;
         sender
             .send(&serializer.serialize(&String::from("last")))
             .await;
@@ -69,17 +69,16 @@ fn close_after_last_message_yields_none() {
 #[test]
 fn large_typed_payload_with_concurrent_ends() {
     Runtime::new().block_on(async {
-        let mut transport = TcpTransport::new().await;
+        let mut transport = TcpTransport::bind().await;
         let endpoint = transport.endpoint().to_string();
         let (mut sender, _) = TcpTransport::connect(&endpoint).await;
         let (_, mut receiver) = transport.accept().await;
 
-        let serializer = SerdeSerializer;
+        let serializer = BincodeSerializer;
         let value: Vec<u32> = (0..1_000_000).collect();
         let bytes = serializer.serialize(&value);
 
-        // Larger than any socket buffer: the two ends must run concurrently
-        // on the single-threaded executor or the send would never drain.
+        // Read while sending so a full socket buffer cannot stall the transfer.
         let (_, received) = futures::join!(async { sender.send(&bytes).await }, async {
             receiver.recv().await.unwrap()
         },);

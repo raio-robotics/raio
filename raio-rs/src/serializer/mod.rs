@@ -1,4 +1,4 @@
-pub mod serde;
+pub mod bincode;
 
 pub trait Serializer<T> {
     fn serialize(&self, value: &T) -> Vec<u8>;

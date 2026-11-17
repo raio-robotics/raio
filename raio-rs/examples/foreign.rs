@@ -20,10 +20,11 @@ impl Worker {
         println!(
             "start work at {} (physical: {})",
             self.node.now(),
-            self.node.physical()
+            self.node.is_physical()
         );
-        async_io::Timer::after(Duration::from_millis(30)).await; // the work
-        println!("got 42 (physical: {})", self.node.physical());
+        // Simulate work completed by another runtime.
+        async_io::Timer::after(Duration::from_millis(30)).await;
+        println!("got 42 (physical: {})", self.node.is_physical());
         println!("node time: {}", self.node.now());
     }
 }

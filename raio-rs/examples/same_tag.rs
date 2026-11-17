@@ -3,8 +3,7 @@ use raio::register;
 use raio::time::{MS, S, Time};
 use std::rc::Rc;
 
-// Two tasks on one node share a tag: `consume` is polled before `produce`, and
-// the value `produce` sets must still leave the node labeled with that tag.
+// Both tasks must finish before the node sends the tag's output.
 
 struct Ticker {
     node: Node,

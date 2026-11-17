@@ -8,25 +8,20 @@ use futures::channel::mpsc::UnboundedSender;
 use crate::port::InputPort;
 use crate::time::Time;
 
-/// An event source fed from outside the node: any thread holding an [`ActionHandle`]
-/// can schedule a value. Each value becomes a physical event, tagged when the node
-/// receives it, and is read like an input port.
+/// Receives values from other threads as physical events.
 pub struct Action<T> {
     pub(crate) port: InputPort<T>,
     pub(crate) handles: RefCell<Handles<T>>,
 }
 
-/// The sender the handles share. The action holds it until the first handle is made;
-/// after that only the handles do, so the last one dropping closes the channel.
+/// Transfers sender ownership from the action to its handles when the first handle is created.
 pub(crate) enum Handles<T> {
     Unused(Arc<UnboundedSender<T>>),
     Live(Weak<UnboundedSender<T>>),
 }
 
 impl<T> Action<T> {
-    /// A `Clone + Send` producer. Create handles in `start`, not in the constructor:
-    /// the constructor also runs in the launcher process. Dropping the last handle
-    /// closes the action.
+    /// Create a producer handle; dropping the last handle closes the action.
     pub fn handle(&self) -> ActionHandle<T> {
         let mut handles = self.handles.borrow_mut();
         let sender = match &*handles {
@@ -73,7 +68,7 @@ impl<T> Clone for ActionHandle<T> {
 }
 
 impl<T> ActionHandle<T> {
-    /// Schedule `value` on the node. It is tagged with the node's physical clock when received.
+    /// Send a value; the receiving node assigns its physical tag.
     pub fn send(&self, value: T) {
         if self.sender.unbounded_send(value).is_err() {
             panic!("the action's node has stopped");
@@ -84,43 +79,44 @@ impl<T> ActionHandle<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::NodeContext;
+    use crate::node::NodeScheduler;
     use crate::port::Builder;
     use crate::runtime::Runtime;
     use std::rc::Rc;
 
-    fn rig() -> (Rc<Runtime>, Rc<NodeContext>, Builder) {
+    fn rig() -> (Rc<Runtime>, Rc<NodeScheduler>, Builder) {
         let runtime = Rc::new(Runtime::new());
-        let ctx = Rc::new(NodeContext::new(runtime.clone()));
-        let builder = Builder::new(0, ctx.clone());
-        (runtime, ctx, builder)
+        let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
+        let builder = Builder::new(0, scheduler.clone());
+        (runtime, scheduler, builder)
     }
 
     #[test]
     fn values_arrive_physically_in_send_order_until_the_last_handle_drops() {
-        let (runtime, ctx, mut builder) = rig();
+        let (runtime, scheduler, mut builder) = rig();
         let action = Rc::new(builder.action::<i64>());
         for task in std::mem::take(&mut builder.tasks) {
             runtime.spawn_internal(task);
         }
-        assert_eq!(ctx.ent(), Time::FOREVER); // an action is never promised
+        // Actions produce no logical events, so they do not limit ENT.
+        assert_eq!(scheduler.ent(), Time::FOREVER);
 
         let early = action.handle();
-        let producer = action.handle(); // shares the channel
-        drop(early); // not the last handle: the action stays open
+        let producer = action.handle(); // Both handles send to the same action.
+        drop(early); // The remaining handle keeps the action open.
         let worker = std::thread::spawn(move || {
             for value in 1..=3 {
                 producer.send(value);
             }
-        }); // `producer` drops with the thread: the action closes
+        }); // Exiting the thread drops the last handle and closes the action.
 
         let seen = Rc::new(RefCell::new(Vec::new()));
-        let (out, task_ctx, task_action) = (seen.clone(), ctx.clone(), action.clone());
-        ctx.run_user(async move {
+        let (out, task_scheduler, task_action) = (seen.clone(), scheduler.clone(), action.clone());
+        scheduler.run_user(async move {
             while let Some((value, tag)) = task_action.wait().await {
                 out.borrow_mut()
-                    .push((*value, tag, task_ctx.physical.get()));
-                assert_eq!(task_ctx.ent(), Time::FOREVER);
+                    .push((*value, tag, task_scheduler.is_physical()));
+                assert_eq!(task_scheduler.ent(), Time::FOREVER);
             }
         });
         worker.join().unwrap();
@@ -130,7 +126,8 @@ mod tests {
         assert_eq!(values, vec![1, 2, 3]);
         assert!(seen.iter().all(|(_, _, physical)| *physical));
         assert!(seen[0].1 > Time::ZERO);
-        assert!(seen.windows(2).all(|pair| pair[0].1 < pair[1].1)); // one tag per value
+        // Each value receives a strictly increasing tag.
+        assert!(seen.windows(2).all(|pair| pair[0].1 < pair[1].1));
     }
 
     #[test]

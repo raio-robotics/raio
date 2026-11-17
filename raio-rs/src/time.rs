@@ -3,9 +3,7 @@ use std::fmt;
 use std::ops::{Add, Mul, Sub};
 use std::time::Duration;
 
-/// A point in logical time, or a duration. Points are superdense: `(nanos, microstep)`,
-/// ordered by nanos first. Microsteps order events that share a nanosecond, so a tag
-/// right after `now` always exists without moving the clock.
+/// A logical timestamp or delay, ordered by nanoseconds and then microsteps.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct Time {
     nanos: i64,
@@ -36,7 +34,7 @@ impl Time {
         Duration::from_nanos(self.nanos as u64)
     }
 
-    /// The tag right after this one: the same nanosecond, one microstep later.
+    /// Advance one microstep within this nanosecond; NEVER and FOREVER remain unchanged.
     pub fn next_microstep(self) -> Time {
         if self == Time::NEVER || self == Time::FOREVER {
             return self;
@@ -48,8 +46,7 @@ impl Time {
     }
 }
 
-/// A delay of zero keeps the microstep; any other delay reaches a new nanosecond, whose
-/// first microstep is 0.
+/// Adding a nonzero nanosecond delay resets the microstep.
 impl Add for Time {
     type Output = Time;
     fn add(self, rhs: Time) -> Time {
@@ -165,7 +162,7 @@ mod tests {
         let tag = 1 * S;
         assert!(tag < tag.next_microstep());
         assert!(tag.next_microstep() < tag.next_microstep().next_microstep());
-        assert!(tag.next_microstep() < 1 * S + NS); // any later nanosecond comes after
+        assert!(tag.next_microstep() < 1 * S + NS); // Nanoseconds take precedence over microsteps.
     }
 
     #[test]
@@ -194,7 +191,8 @@ mod tests {
     fn sentinels_absorb() {
         assert_eq!(Time::NEVER + S, Time::NEVER);
         assert_eq!(S + Time::FOREVER, Time::FOREVER);
-        assert_eq!(Time::NEVER + Time::FOREVER, Time::NEVER); // NEVER wins
+        // NEVER takes precedence when both sentinels are added.
+        assert_eq!(Time::NEVER + Time::FOREVER, Time::NEVER);
         assert_eq!(Time::NEVER * 0, Time::NEVER);
         assert_eq!(Time::FOREVER * 3, Time::FOREVER);
         assert_eq!(S - Time::FOREVER, Time::NEVER);

@@ -66,7 +66,7 @@ impl Echo {
 
     async fn start(self: Rc<Self>) {
         while let Some((key, _)) = self.input.wait().await {
-            println!("echo {} (physical: {})", *key, self.node.physical());
+            println!("echo {} (physical: {})", *key, self.node.is_physical());
         }
     }
 }
