@@ -282,6 +282,13 @@ impl<T> OutputPort<T> {
         serializers.set(name, Rc::new(serializer));
     }
 
+    /// Have this serializer too, for the connections whose inputs use it.
+    pub fn add_serializer(&self, serializer: impl Serializer<T> + 'static) {
+        let name = serializer.name().to_string();
+        let serializers = &self.channel.setting.serializers;
+        serializers.add(name, Rc::new(serializer));
+    }
+
     /// Use this transport in place of the port's default.
     pub fn set_transport(&self, transport: impl Transport + 'static) {
         let name = transport.name().to_string();
@@ -464,6 +471,11 @@ mod tests {
         assert_eq!(described.id, 1);
         assert_eq!(described.serializers, ["bincode"]);
         assert_eq!(described.transports, ["tcp"]);
+
+        out.add_serializer(Decimal);
+        // An output keeps a serializer for each choice that its connections make.
+        let serializers = out.channel.setting.describe().serializers;
+        assert_eq!(serializers, ["bincode", Decimal.name()]);
 
         out.set_serializer(Decimal);
         out.set_transport(Loopback);

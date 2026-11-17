@@ -57,6 +57,43 @@ impl Serializer<PyValue> for Pickle {
     }
 }
 
+/// Serializes port values with a serializer written in Python.
+pub(crate) struct Custom {
+    pub(crate) name: String,
+    pub(crate) serializer: Py<PyAny>,
+}
+
+impl Serializer<PyValue> for Custom {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn serialize(&self, value: &PyValue) -> Vec<u8> {
+        Python::attach(|py| {
+            let serializer = self.serializer.bind(py);
+            let data = serializer
+                .call_method1("serialize", (value.0.bind(py),))
+                .unwrap_or_else(|error| panic!("{} cannot serialize a value: {error}", self.name));
+            let Ok(data) = data.cast::<PyBytes>() else {
+                panic!("{} must serialize a value to bytes, not {data}", self.name);
+            };
+            data.as_bytes().to_vec()
+        })
+    }
+
+    fn deserialize(&self, bytes: &[u8]) -> PyValue {
+        Python::attach(|py| {
+            let serializer = self.serializer.bind(py);
+            let value = serializer
+                .call_method1("deserialize", (PyBytes::new(py, bytes),))
+                .unwrap_or_else(|error| {
+                    panic!("{} cannot deserialize a value: {error}", self.name)
+                });
+            PyValue(value.unbind())
+        })
+    }
+}
+
 impl Payload for PyValue {
     fn default_serializer() -> Rc<dyn Serializer<Self>> {
         Rc::new(Pickle)

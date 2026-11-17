@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+from typing import Protocol, TypeVar
 
 import cloudpickle
 
@@ -17,10 +18,20 @@ from .node import Node
 from .ports import InputPort, OutputPort
 from .utils import end_processes, flush_output
 
-_connections = []  # (source, target, delay) of every connection made in this process
+T = TypeVar("T")
+
+_connections = []  # (source, target, delay, serializer) of every connection made in this process
 
 
-def connect(source, target, *, delay: Time = Time.ZERO) -> None:
+class Serializer(Protocol[T]):
+    """Converts the values of one connection to and from bytes."""
+
+    def serialize(self, value: T) -> bytes: ...
+
+    def deserialize(self, data: bytes) -> T: ...
+
+
+def connect(source, target, *, delay: Time = Time.ZERO, serializer: Serializer | None = None):
     """Send every value of an output port to an input port, shifted by a logical delay."""
     if not isinstance(source, OutputPort) or source._node is None:
         raise ValueError(f"connect needs an output port of a node instance, got {source!r}")
@@ -28,7 +39,7 @@ def connect(source, target, *, delay: Time = Time.ZERO) -> None:
         raise ValueError(f"connect needs an input port of a node instance, got {target!r}")
     if not isinstance(delay, Time) or delay < Time.ZERO or delay.microstep:
         raise ValueError("a connection delay is a Time of zero or more nanoseconds")
-    _connections.append((source, target, delay))
+    _connections.append((source, target, delay, serializer))
 
 
 def run(*nodes: Node, fast_forward: bool = False) -> None:
@@ -45,7 +56,8 @@ def run(*nodes: Node, fast_forward: bool = False) -> None:
             raise ValueError(f"{type(node).__name__} was given to run twice")
         positions[id(node)] = len(positions)
     connections = []
-    for source, target, delay in _connections:
+    serializers = [[] for _ in nodes]  # (port, name, serializer) for each node's ports
+    for source, target, delay, serializer in _connections:
         ends = (id(source._node) in positions, id(target._node) in positions)
         if ends == (False, False):
             continue  # A connection of another app.
@@ -53,11 +65,16 @@ def run(*nodes: Node, fast_forward: bool = False) -> None:
             raise ValueError(f"{source!r} feeds {target!r}, but only one of their nodes is run")
         source_node, target_node = positions[id(source._node)], positions[id(target._node)]
         connections.append((source_node, source._index, target_node, target._index, delay.nanos))
+        if serializer is not None:
+            # Both ends of the connection know the serializer by the name of its class.
+            name = f"{type(serializer).__module__}.{type(serializer).__qualname__}"
+            serializers[source_node].append((source._index, name, serializer))
+            serializers[target_node].append((target._index, name, serializer))
     # Pickling comes first, so that a node that cannot be sent fails before anything starts.
     # Each node's process imports from the same places as this one, so the path goes with it.
     code = {}
     for index, node in enumerate(nodes):
-        code[index] = pickle.dumps((sys.path, cloudpickle.dumps(node)))
+        code[index] = pickle.dumps((sys.path, cloudpickle.dumps((node, serializers[index]))))
     coordinator = core.coordinator(len(nodes), connections, code)
     _launch(nodes, coordinator, fast_forward)
 

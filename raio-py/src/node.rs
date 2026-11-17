@@ -15,7 +15,7 @@ use raio::runtime::{Runtime, TaskId, WakeKind};
 use raio::time::Time;
 
 use crate::awaitable::{Awaitable, PyFuture, to_future};
-use crate::ports::{Closed, Port, PyValue, SENDERS};
+use crate::ports::{Closed, Custom, Port, PyValue, SENDERS};
 use crate::time::PyTime;
 
 /// The node that runs on this thread: its clock, its ports and the error that stopped it.
@@ -140,7 +140,8 @@ fn release_gil(wait: &mut dyn FnMut()) {
 /// Run one node in this process until it finishes.
 ///
 /// `load` turns the code that the coordinator holds for the node into the kinds of the node's
-/// ports and a function that returns the coroutines of its tasks.
+/// ports, the serializers that its connections chose for them, each with the port's position
+/// and its own name, and a function that returns the coroutines of its tasks.
 #[pyfunction]
 fn run_node(
     py: Python<'_>,
@@ -157,7 +158,8 @@ fn run_node(
         PyRuntimeError::new_err(format!("the coordinator holds no code for node {node_id}"))
     })?;
     let loaded = load.call1(py, (PyBytes::new(py, &code),))?;
-    let (kinds, start): (Vec<String>, Py<PyAny>) = loaded.extract(py)?;
+    type Loaded = (Vec<String>, Vec<(usize, String, Py<PyAny>)>, Py<PyAny>);
+    let (kinds, serializers, start): Loaded = loaded.extract(py)?;
     let known = ["input", "output", "action"];
     if let Some(kind) = kinds.iter().find(|kind| !known.contains(&kind.as_str())) {
         return Err(PyValueError::new_err(format!("unknown port kind {kind:?}")));
@@ -180,8 +182,19 @@ fn run_node(
                     Port::Action(action)
                 }
             });
+        let ports: Vec<Port> = ports.collect();
+        for (index, name, serializer) in serializers {
+            let custom = Custom { name, serializer };
+            match ports.get(index) {
+                // An input has the one serializer of its connection.
+                Some(Port::Input(input)) => input.set_serializer(custom),
+                // An output keeps one for each choice that its connections make.
+                Some(Port::Output(output)) => output.add_serializer(custom),
+                _ => panic!("port {index} of this node takes no serializer"),
+            }
+        }
         Running {
-            ports: ports.collect(),
+            ports,
             node: builder.node(),
             failure: RefCell::new(None),
         }

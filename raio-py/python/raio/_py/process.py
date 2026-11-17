@@ -14,11 +14,11 @@ from .utils import buffer_output_by_line
 
 
 def _load(code):
-    """Rebuild the node from its code; return its port kinds and the function that starts it."""
+    """Rebuild the node from its code; return what raio-rs needs to build it and start it."""
     path, payload = pickle.loads(code)
     sys.path[:] = path  # The node's classes are imported from where the launcher found them.
-    node = cloudpickle.loads(payload)
-    return _kinds(node), lambda: _start(node)
+    node, serializers = cloudpickle.loads(payload)
+    return _kinds(node), serializers, lambda: _start(node)
 
 
 def main():
