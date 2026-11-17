@@ -8,9 +8,9 @@
       "extra-files": [
         { "type": "generic", "path": "Cargo.toml" },
         { "type": "generic", "path": "core/Cargo.toml" },
-        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name=='raio-rs')].version" },
-        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name=='raio-py')].version" },
-        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name=='raio-macros')].version" }
+        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name.value=='raio-rs')].version" },
+        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name.value=='raio-py')].version" },
+        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name.value=='raio-macros')].version" }
       ]
     }
   }
