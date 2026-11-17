@@ -38,17 +38,16 @@ impl Synchronizer {
     }
 
     async fn start(self) {
-        while let Some(value) = self.left.wait().await {
+        while let Some((value, timestamp)) = self.left.wait().await {
             let Some(right) = self.right.get().map(|v| *v) else {
                 continue;
             };
             println!(
-                "{}: left {} at {}; right {:?} at {}",
+                "{}: left {} and right {} at {}",
                 self.node.now(),
                 *value,
-                self.left.timestamp(),
                 right,
-                self.right.timestamp()
+                timestamp
             );
         }
     }

@@ -14,6 +14,8 @@ use std::task::Waker;
 
 use crate::node::EventDrain;
 use crate::node::{Node, Timer};
+use std::future::Future;
+use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
@@ -120,22 +122,27 @@ pub struct InputPort<T> {
 impl<T> InputPort<T> {
     /// Read the latest value from the port
     pub fn get(&self) -> Option<Ref<'_, T>> {
-        Ref::filter_map(self.channel.latest_value.borrow(), |latest| latest.as_ref()).ok()
+        let now = self.node_context.now();
+        self.latest()
+            .and_then(|(value, timestamp)| (timestamp == now).then_some(value))
     }
 
-    pub fn timestamp(&self) -> Time {
-        self.channel.latest_timestamp.get()
+    pub fn latest(&self) -> Option<(Ref<'_, T>, Time)> {
+        let timestamp = self.channel.latest_timestamp.get();
+        Ref::filter_map(self.channel.latest_value.borrow(), |latest| latest.as_ref())
+            .ok()
+            .map(|value| (value, timestamp))
     }
 
-    pub async fn wait(&self) -> Option<Ref<'_, T>> {
+    pub fn wait(&self) -> impl Future<Output = Option<(Ref<'_, T>, Time)>> {
         let called_at = self.node_context.now();
         assert!(
             self.channel.latest_timestamp.get() <= called_at,
             "latest timestamp is in the future"
         );
-        std::future::poll_fn(|cx| {
+        std::future::poll_fn(move |cx| {
             if self.channel.latest_timestamp.get() > called_at {
-                return Poll::Ready(self.get());
+                return Poll::Ready(self.latest());
             };
             if self.channel.queue.borrow().is_empty()
                 && self.channel.remote_ent.get() == Time::FOREVER
@@ -144,12 +151,15 @@ impl<T> InputPort<T> {
             };
             self.node_context.try_advance();
             if self.channel.latest_timestamp.get() > called_at {
-                return Poll::Ready(self.get());
+                return Poll::Ready(self.latest());
             };
             self.channel.register_waker(called_at, cx.waker().clone());
             Poll::Pending
         })
-        .await
+    }
+
+    pub fn pin(&self) -> Pin<Box<impl Future<Output = Option<(Ref<'_, T>, Time)>>>> {
+        Box::pin(self.wait())
     }
 }
 
@@ -380,8 +390,8 @@ mod tests {
 
         let (out, fin) = (seen.clone(), done.clone());
         rig.runtime.spawn(async move {
-            while let Some(value) = port.wait().await {
-                out.borrow_mut().push((*value, port.timestamp()));
+            while let Some((value, timestamp)) = port.wait().await {
+                out.borrow_mut().push((*value, timestamp));
             }
             fin.set(true);
         });
@@ -410,7 +420,7 @@ mod tests {
 
         let out = seen.clone();
         rig.runtime.spawn(async move {
-            if let Some(value) = left.wait().await {
+            if let Some((value, _)) = left.wait().await {
                 out.borrow_mut().push(*value);
             }
         });
@@ -443,11 +453,11 @@ mod tests {
 
         let out = seen.clone();
         rig.runtime.spawn(async move {
-            if let Some(value) = left.wait().await {
+            if let Some((value, _)) = left.wait().await {
                 // Same instant: the sibling's simultaneous value is a
                 // settled fact, readable without waiting.
-                let sibling = right.get().map(|v| *v);
-                out.borrow_mut().push((*value, sibling, right.timestamp()));
+                let sibling = right.latest().map(|(v, timestamp)| (*v, timestamp));
+                out.borrow_mut().push((*value, sibling));
             }
         });
         rig.settle();
@@ -460,8 +470,57 @@ mod tests {
         rig.settle();
 
         // One advance latched both queued 2s values.
-        assert_eq!(*seen.borrow(), vec![(1, Some(7), 2 * S)]);
+        assert_eq!(*seen.borrow(), vec![(1, Some((7, 2 * S)))]);
         assert_eq!(rig.ctx.now(), 2 * S);
+    }
+
+    #[test]
+    fn wait_resolves_via_latest_even_after_further_advances() {
+        let rig = Rig::new();
+        let (right, right_ch) = rig.port(0);
+        let (_left, left_ch) = rig.port(1);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+
+        let out = seen.clone();
+        rig.runtime.spawn(async move {
+            if let Some((value, timestamp)) = right.wait().await {
+                out.borrow_mut().push((*value, timestamp));
+            }
+        });
+        rig.settle();
+
+        right_ch.push(3 * S, 30);
+        right_ch.update_remote_ent(10 * S);
+        left_ch.push(5 * S, 50);
+        left_ch.update_remote_ent(10 * S);
+        rig.ctx.try_advance();
+        rig.ctx.try_advance();
+        assert_eq!(rig.ctx.now(), 5 * S);
+        rig.settle();
+
+        assert_eq!(*seen.borrow(), vec![(30, 3 * S)]);
+    }
+
+    #[test]
+    fn wait_baseline_is_at_call_not_first_poll() {
+        let rig = Rig::new();
+        let (port, channel) = rig.port(0);
+        let ctx = rig.ctx.clone();
+        let seen = Rc::new(RefCell::new(None));
+
+        let out = seen.clone();
+        rig.runtime.spawn(async move {
+            let pending = port.wait();
+            // Deliver into the gap between creation and first poll —
+            // the select() blind spot.
+            channel.push(1 * S, 7);
+            channel.close();
+            ctx.try_advance();
+            *out.borrow_mut() = Some(pending.await.map(|(value, timestamp)| (*value, timestamp)));
+        });
+        rig.settle();
+
+        assert_eq!(*seen.borrow(), Some(Some((7, 1 * S))));
     }
 
     #[test]
@@ -473,7 +532,7 @@ mod tests {
 
         let (out, fin) = (seen.clone(), done.clone());
         rig.runtime.spawn(async move {
-            while let Some(value) = port.wait().await {
+            while let Some((value, _)) = port.wait().await {
                 out.borrow_mut().push(*value);
             }
             fin.set(true);
