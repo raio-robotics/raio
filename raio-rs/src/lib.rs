@@ -4,6 +4,7 @@ pub mod messages;
 pub mod port;
 pub mod runtime;
 pub mod serializer;
+pub mod time;
 pub mod transport;
 
 pub fn add(left: u64, right: u64) -> u64 {
