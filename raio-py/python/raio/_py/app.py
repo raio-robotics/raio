@@ -42,8 +42,8 @@ def connect(
         raise ValueError(f"connect needs an output port of a node instance, got {source!r}")
     if not isinstance(target, InputPort) or target._node is None:
         raise ValueError(f"connect needs an input port of a node instance, got {target!r}")
-    if not isinstance(delay, Time) or delay < Time.ZERO or delay.microstep:
-        raise ValueError("a connection delay is a Time of zero or more nanoseconds")
+    if not isinstance(delay, Time) or delay < Time.ZERO:
+        raise ValueError("a connection delay is a Time of zero or more")
     _connections.append((source, target, delay, serializer, physical))
 
 
@@ -101,7 +101,7 @@ def _wire(positions):
             raise ValueError(f"{source!r} feeds {target!r}, but only one of their nodes is run")
         source_node, target_node = positions[id(source._node)], positions[id(target._node)]
         connections.append(
-            (source_node, source._index, target_node, target._index, delay.nanos, physical)
+            (source_node, source._index, target_node, target._index, delay, physical)
         )
         rust = [isinstance(port._node, RustNode) for port in (source, target)]
         if serializer is not None and all(rust):

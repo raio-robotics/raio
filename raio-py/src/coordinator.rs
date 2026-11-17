@@ -6,7 +6,8 @@ use std::thread::JoinHandle;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use raio::coordinator::{Connection, CoordinatorHandle, Failure, Graph, PortId};
-use raio::time::Time;
+
+use crate::time::PyTime;
 
 /// The coordinator of an app, running on its own thread.
 #[pyclass(module = "raio")]
@@ -58,9 +59,9 @@ impl Coordinator {
     }
 }
 
-/// A connection as Python gives it: source node and port, target node and port, the delay in
-/// nanoseconds, and whether it is physical.
-pub(crate) type PyConnection = (usize, usize, usize, usize, i64, bool);
+/// A connection as Python gives it: source node and port, target node and port, the delay, and
+/// whether it is physical.
+pub(crate) type PyConnection = (usize, usize, usize, usize, Py<PyTime>, bool);
 
 pub(crate) fn connection(connection: PyConnection) -> Connection {
     let (from_node, from_port, to_node, to_port, delay, physical) = connection;
@@ -68,7 +69,7 @@ pub(crate) fn connection(connection: PyConnection) -> Connection {
     Connection {
         from: port(from_node, from_port),
         to: port(to_node, to_port),
-        delay: Time::new(delay),
+        delay: delay.get().0,
         physical,
     }
 }

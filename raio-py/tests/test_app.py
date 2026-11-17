@@ -20,6 +20,13 @@ def test_a_delay_shifts_the_timestamps_of_a_connection(capfd):
     assert lines(capfd) == ["printer got 0 at 11ms", "printer got 1 at 12ms"]
 
 
+def test_a_delay_may_be_a_microstep(capfd):
+    ticker, printer = Ticker(1 * MS, 2), Printer()
+    raio.connect(ticker.out, printer.inp, delay=Time(0, 1))
+    raio.run(ticker, printer)
+    assert lines(capfd) == ["printer got 0 at (1ms, 1)", "printer got 1 at (2ms, 1)"]
+
+
 def test_one_output_feeds_several_inputs(capfd):
     ticker, near, far = Ticker(1 * MS, 1), Printer("near"), Printer("far")
     raio.connect(ticker.out, near.inp)
@@ -154,7 +161,7 @@ def test_connect_takes_an_output_and_an_input_of_node_instances():
         raio.connect(Ticker.out, printer.inp)
     with pytest.raises(ValueError, match="an input port of a node instance"):
         raio.connect(ticker.out, ticker.out)
-    with pytest.raises(ValueError, match="a Time of zero or more nanoseconds"):
+    with pytest.raises(ValueError, match="a Time of zero or more"):
         raio.connect(ticker.out, printer.inp, delay=-1 * MS)
 
 

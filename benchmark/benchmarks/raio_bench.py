@@ -6,7 +6,9 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 import raio
-from raio import NS, InputPort, Node, OutputPort, reaction, task
+from raio import InputPort, Node, OutputPort, Time, reaction, task
+
+MICROSTEP = Time(0, 1)
 
 
 class Multiplier(Node):
@@ -41,7 +43,7 @@ class Sender(Node):
     async def measure(self):
         all_results: Dict[int, List[float]] = {}
         # Timestamp 0 completes at startup, so the first array is sent after it.
-        await raio.wait(1 * NS)
+        await raio.wait(MICROSTEP)
         for size in self.array_sizes:
             array = np.random.rand(size).astype(np.float64)
 
@@ -81,7 +83,7 @@ def benchmark_raio(
 
     raio.connect(sender.data_out, multiplier.input_data)
     # A loop of connections needs a delay, and the sender starts the loop before it has passed.
-    raio.connect(multiplier.output_result, sender.result_in, delay=2 * NS)
+    raio.connect(multiplier.output_result, sender.result_in, delay=MICROSTEP)
 
     raio.run(sender, multiplier)
 
