@@ -64,12 +64,10 @@ class Select(Node):
     async def main(self):
         print(await raio.select(self.a, self.b))
         print(await raio.select(self.a, self.b))
-        match await raio.select(value=self.b, late=raio.wait(10 * S)):
-            case {"value": value}:
-                print("value", value, raio.now())
-        match await raio.select(value=self.b, late=raio.wait(250 * MS)):
-            case {"late": timestamp}:
-                print("late", timestamp)
+        ready = await raio.select(value=self.b, late=raio.wait(10 * S))
+        print("value", ready["value"], raio.now())
+        ready = await raio.select(value=self.b, late=raio.wait(250 * MS))
+        print("late", ready["late"])
         async for _ in self.a:
             pass
         try:

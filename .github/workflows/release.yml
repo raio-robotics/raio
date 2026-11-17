@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write # Starts the checks of the release pull request.
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json
+      - name: Start the checks of the release pull request
+        if: steps.release.outputs.pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh workflow run wheels.yml --ref "$BRANCH"
+
+  ci:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  wheels:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/wheels.yml
+
+  publish:
+    needs: [release-please, ci, wheels]
+    runs-on: ubuntu-latest
+    environment: release # Waits for the approval of a required reviewer.
+    permissions:
+      contents: read
+      id-token: write # Trusted publishing to crates.io and PyPI.
+    env:
+      VERSION: ${{ needs.release-please.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: crates-io
+      - name: Publish the crates that crates.io does not have yet
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io.outputs.token }}
+        run: |
+          for CRATE in raio-macros raio-rs; do
+            if curl --silent --fail --output /dev/null --user-agent raio-release "https://crates.io/api/v1/crates/$CRATE/$VERSION"; then
+              echo "$CRATE $VERSION is already published"
+            else
+              cargo publish --package "$CRATE"
+            fi
+          done
+      - name: Publish the wheels to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true

@@ -21,6 +21,7 @@ from ._rs.core import (
     S,
     Task,
     Time,
+    __version__,
     gather,
     is_physical,
     now,
