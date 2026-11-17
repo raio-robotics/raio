@@ -16,7 +16,7 @@ impl Worker {
     }
 
     async fn start(self: Rc<Self>) {
-        let now = self.node.wait(1 * S).await;
+        self.node.wait(1 * S).await;
         println!(
             "start work at {} (physical: {})",
             self.node.now(),
