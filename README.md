@@ -242,7 +242,7 @@ python
 
 ```bash
 pip install pre-commit
-pre-commit install --hook-type commit-msg --hook-type pre-push
+pre-commit install
 pre-commit run --all-files
 ```
 
