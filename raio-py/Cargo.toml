@@ -14,7 +14,7 @@ test = false
 doctest = false
 
 [dependencies]
-raio-rs = { path = "../raio-rs" }
+raio-rs = { path = "../raio-rs", features = ["serde_bytes"] }
 pyo3 = "0.29"
 
 [features]

@@ -190,6 +190,18 @@ fn fanout() {
 }
 
 #[test]
+fn ping_pong() {
+    let stdout = run_example("ping_pong");
+    // Each trip around the loop takes the delay of the connection back.
+    assert_eq!(
+        stdout,
+        "ping got 1 at 11ms\n\
+         ping got 2 at 21ms\n\
+         ping got 3 at 31ms\n"
+    );
+}
+
+#[test]
 fn serializer() {
     let stdout = run_example("serializer");
     assert_eq!(stdout, "sink received 42\n");

@@ -1,0 +1,12 @@
+services:
+  benchmark:
+    build:
+      context: ..
+      dockerfile: benchmark/ros2.dockerfile
+    volumes:
+      - ./results:/benchmark/results
+    shm_size: 10gb
+    cpuset: "0-9"
+    privileged: true
+    network_mode: host
+    pid: host

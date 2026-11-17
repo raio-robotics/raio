@@ -69,6 +69,12 @@
 //! - [`diagram`]: a picture of an app, with its nodes, their tasks, and their connections.
 //! - [`runtime`] and [`driver`]: the single-threaded executor under each node, and its I/O and
 //!   timers.
+//!
+//! # Features
+//!
+//! - `serde_bytes`: encodes the value of a frame as one block of bytes, not byte by byte, which
+//!   is much faster for large values. The Python binding has it on. A node built with it and a
+//!   node built without it can connect.
 
 pub mod app;
 pub mod coordinator;

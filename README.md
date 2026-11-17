@@ -119,6 +119,10 @@ How a node runs:
 - With every timestamp, a node also promises its receivers the earliest timestamp at which it
   may send again. A receiver handles a timestamp only once the promise of each of its senders
   is beyond it.
+- Before a sender's first promise, a receiver has the one that the coordinator works out from
+  the graph: nothing arrives until the delay of the connection has passed. This is what lets a
+  loop of connections start. The loop needs a delay, and one of its nodes has to act before
+  that delay has passed.
 - A node handles a timestamp no earlier than the wall clock reaches it. In fast-forward mode it
   does not wait for the wall clock, which suits tests and replays.
 

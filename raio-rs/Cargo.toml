@@ -20,6 +20,7 @@ libc = "0.2" # Catches ^C in a launcher and ignores it in a node.
 polling = "3"
 rmp-serde = "1" # MessagePack, the serializer that nodes in other languages share.
 serde = {version = "1.0", features = ["derive"]}
+serde_bytes = {version = "0.11", optional = true} # Encodes the value of a frame as one block of bytes.
 serde_json = "1" # The graph that elkrs takes and returns.
 
 [dev-dependencies]

@@ -469,8 +469,8 @@ mod tests {
                     reply => panic!("{reply:?}"),
                 })
                 .collect();
-            assert_eq!(wirings[0][&0].len(), 2);
-            assert!(wirings[2].is_empty()); // The logger has no outputs.
+            assert_eq!(wirings[0].outputs[&0].len(), 2);
+            assert!(wirings[2].outputs.is_empty()); // The logger has no outputs.
         });
     }
 

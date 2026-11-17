@@ -41,6 +41,8 @@ impl Graph {
     ///
     /// A connection goes from an output to an input, the output has the serializer and the
     /// transport that the input uses, and every input has exactly one connection.
+    ///
+    /// An input starts with the earliest timestamp that its connection can deliver.
     pub(crate) fn wire(
         &self,
         nodes: &BTreeMap<NodeId, RegisterNode>,
@@ -79,10 +81,18 @@ impl Graph {
             }
             connected.push(to);
             let wiring = wirings.get_mut(&from.node_id).unwrap();
-            wiring.entry(from.port_id).or_default().push(Downstream {
-                input: input.clone(),
-                delay: connection.delay,
-            });
+            wiring
+                .outputs
+                .entry(from.port_id)
+                .or_default()
+                .push(Downstream {
+                    input: input.clone(),
+                    delay: connection.delay,
+                });
+            // No node sends at timestamp 0, which is complete when the app starts.
+            let ent = Time::ZERO.next_microstep() + connection.delay;
+            let wiring = wirings.get_mut(&to.node_id).unwrap();
+            wiring.inputs.insert(to.port_id, ent);
         }
         for (node_id, node) in nodes {
             for input in &node.inputs {
@@ -167,14 +177,26 @@ pub(crate) mod tests {
         let to = |input, delay| Downstream { input, delay };
         // The output feeds both inputs, in the order the graph lists them.
         assert_eq!(
-            wirings[&0][&0],
+            wirings[&0].outputs[&0],
             vec![
                 to(input(0, "planner:1"), Time::ZERO),
                 to(input(3, "logger:1"), 10 * MS)
             ]
         );
-        assert!(wirings[&1].is_empty()); // Nothing listens to the plan.
-        assert!(wirings[&2].is_empty()); // An input learns nothing from its wiring.
+        assert!(wirings[&1].outputs.is_empty()); // Nothing listens to the plan.
+        assert!(wirings[&2].outputs.is_empty());
+    }
+
+    #[test]
+    fn an_input_starts_with_the_earliest_timestamp_its_connection_can_deliver() {
+        let mut delayed = fan_out();
+        delayed[1].delay = 10 * MS;
+        let wirings = graph(delayed).wire(&nodes()).unwrap();
+
+        assert!(wirings[&0].inputs.is_empty()); // The camera has no inputs.
+        // The camera can first send at (0, 1), and a connection without a delay keeps that.
+        assert_eq!(wirings[&1].inputs[&0], Time::ZERO.next_microstep());
+        assert_eq!(wirings[&2].inputs[&3], 10 * MS); // A delay resets the microstep.
     }
 
     fn refusal(connections: Vec<Connection>, nodes: BTreeMap<NodeId, RegisterNode>) -> String {
@@ -240,7 +262,7 @@ pub(crate) mod tests {
         camera.serializers.push("msgpack".to_string());
         camera.transports.push("udp".to_string());
         let wirings = graph(fan_out()).wire(&nodes).unwrap();
-        let used: Vec<_> = wirings[&0][&0]
+        let used: Vec<_> = wirings[&0].outputs[&0]
             .iter()
             .map(|downstream| &downstream.input)
             .map(|input| (input.serializer.as_str(), input.transport.as_str()))

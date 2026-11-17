@@ -50,8 +50,14 @@ pub struct Downstream {
     pub delay: Time,
 }
 
-/// The connections that each output of one node feeds, keyed by port id.
-pub type Wiring = HashMap<usize, Vec<Downstream>>;
+/// What the graph gives the ports of one node, keyed by port id.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+pub struct Wiring {
+    /// The connections that each output feeds.
+    pub outputs: HashMap<usize, Vec<Downstream>>,
+    /// The ENT that each input starts with, before its sender has promised anything.
+    pub inputs: HashMap<usize, Time>,
+}
 
 /// The coordinator's reply to a node that has registered.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -97,5 +103,29 @@ pub struct Frame {
     pub ent: Time,
     /// A physical frame may get a later timestamp, which keeps it ahead of the receiver's clock.
     pub physical: bool,
+    /// Encoded byte by byte unless the `serde_bytes` feature is on; the bytes sent are the same.
+    #[cfg_attr(feature = "serde_bytes", serde(with = "serde_bytes"))]
     pub value: Option<Vec<u8>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serializer::Serializer;
+    use crate::serializer::bincode::BincodeSerializer;
+
+    #[test]
+    fn a_frame_is_the_same_bytes_with_and_without_serde_bytes() {
+        let frame = Frame {
+            timestamp: Time::new(1),
+            ent: Time::new(2),
+            physical: false,
+            value: Some(vec![7, 8, 9]),
+        };
+        let bytes = BincodeSerializer.serialize(&frame);
+        // The value follows its length, so nodes built with and without the feature can connect.
+        assert_eq!(bytes, [2, 0, 4, 0, 0, 1, 3, 7, 8, 9]);
+        let decoded: Frame = BincodeSerializer.deserialize(&bytes);
+        assert_eq!(decoded.value, frame.value);
+    }
 }

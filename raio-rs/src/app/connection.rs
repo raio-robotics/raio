@@ -24,6 +24,7 @@ pub(crate) trait AnyInput {
         self: Rc<Self>,
         scheduler: Rc<NodeScheduler>,
     ) -> BoxFuture<(InputInfo, BoxFuture<()>)>;
+    fn update_remote_ent(&self, promise: Time);
 }
 
 /// An output port whose payload type is hidden from the node's wiring.
@@ -99,6 +100,10 @@ impl<T: 'static> AnyInput for (Rc<InputChannel<T>>, Rc<PortSetting<T>>) {
             (info, receive)
         })
     }
+
+    fn update_remote_ent(&self, promise: Time) {
+        self.0.update_remote_ent(promise);
+    }
 }
 
 impl<T: 'static> AnyOutput for OutputChannel<T> {
@@ -135,9 +140,11 @@ pub(crate) async fn connect_node(
         inputs: Vec::new(),
         outputs: Vec::new(),
     };
+    let mut receivers = HashMap::new();
     let mut receives = Vec::new();
     for input in inputs {
-        let (info, receive) = input.listen(scheduler.clone()).await;
+        let (info, receive) = input.clone().listen(scheduler.clone()).await;
+        receivers.insert(info.id, input);
         registration.inputs.push(info);
         receives.push(receive);
     }
@@ -153,6 +160,10 @@ pub(crate) async fn connect_node(
         Reply::Refused(refusal) => panic!("node {}: {refusal}", link.node_id),
         Reply::Cancelled => return None,
     };
+    // An input can go this far before its sender's first frame, which is what starts a loop.
+    for (id, ent) in &wiring.inputs {
+        receivers[id].update_remote_ent(*ent);
+    }
     scheduler.start_clock();
     // The link stays open while the node runs; the node does not wait for it.
     scheduler
@@ -160,7 +171,7 @@ pub(crate) async fn connect_node(
         .spawn_internal(link.run(scheduler.clone()));
 
     let mut sends = Vec::new();
-    for (id, downstreams) in wiring {
+    for (id, downstreams) in wiring.outputs {
         for downstream in downstreams {
             sends.push(senders[&id].clone().connect_to(downstream));
         }

@@ -3,6 +3,9 @@ target/
 # Diagrams
 **/*.svg
 
+# Benchmark
+benchmark/results/
+
 # Python
 **/__pycache__/
 **/.pytest_cache/

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
-NAMES = ["action", "hello", "join", "mixed", "reaction", "same_timestamp", "select_first"]
-NAMES += ["serializer", "shutdown", "sync"]
+NAMES = ["action", "hello", "join", "mixed", "ping_pong", "reaction", "same_timestamp"]
+NAMES += ["select_first", "serializer", "shutdown", "sync"]
 
 
 def run_example(name):
@@ -51,6 +51,11 @@ def test_mixed(finished):
         "{'name': 'celsius', 'value': 205.0} at 1ms",
         "{'name': 'celsius', 'value': 210.0} at 2ms",
     ]
+
+
+def test_ping_pong(finished):
+    # Each trip around the loop takes the delay of the connection back.
+    assert printed(finished, "ping_pong") == [f"ping got {i} at {i}1ms" for i in (1, 2, 3)]
 
 
 def test_reaction(finished):
