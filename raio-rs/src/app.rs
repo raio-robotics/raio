@@ -48,9 +48,30 @@ impl App {
     }
 
     pub fn run(self) {
-        let runtime = Runtime::new();
-        for runner in self.nodes {
-            runner(&runtime);
+        let args = std::env::args().collect::<Vec<String>>();
+        match args.iter().position(|arg| arg == "--node_id") {
+            Some(index) => {
+                let node_id = args[index + 1].parse::<usize>().unwrap();
+                let runner = self.nodes.into_iter().nth(node_id).unwrap();
+                runner(&Runtime::new());
+            }
+            None => {
+                let exe = std::env::current_exe().unwrap();
+                let children = (0..self.nodes.len())
+                    .map(|node_id| {
+                        std::process::Command::new(&exe)
+                            .arg("--node_id")
+                            .arg(&node_id.to_string())
+                            .args(&args[1..])
+                            .spawn()
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                for mut child in children {
+                    let status = child.wait().unwrap();
+                    assert!(status.success(), "node exited with {status} status");
+                }
+            }
         }
     }
 }
