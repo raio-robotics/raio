@@ -17,9 +17,9 @@ def test_a_diagram_shows_the_nodes_with_their_ports_and_tasks_and_the_connection
     path = tmp_path / "pipeline.svg"
     raio.diagram(path, ticker, printer)
     svg = path.read_text()
-    # The diagram has the name of its file. A node has its id in its corner and the name of its
-    # class; a task has the name of its method, and a port its own.
-    shown = ["pipeline", "10ms", "0", "Ticker", "tick", "out", "1", "Printer", "show", "inp"]
+    # A node has its id in its corner and the name of its class; a task has the name of its
+    # method, and a port its own.
+    shown = ["10ms", "0", "Ticker", "tick", "out", "1", "Printer", "show", "inp"]
     assert texts(svg) == shown
     assert svg.count('class="connection"') == 1 and svg.count('class="port"') == 2
 
@@ -43,7 +43,7 @@ def test_a_diagram_shows_an_action_inside_its_node_and_a_reaction_among_the_task
     raio.connect(keyboard.typed, keyboard.echo)
     raio.diagram(tmp_path / "keyboard.svg", keyboard)
     svg = (tmp_path / "keyboard.svg").read_text()
-    shown = ["keyboard", "0", "Keyboard", "P", "keys", "read", "show", "echo", "typed"]
+    shown = ["0", "Keyboard", "P", "keys", "read", "show", "echo", "typed"]
     assert texts(svg) == shown
     assert svg.count('class="action"') == 1 and svg.count('class="task"') == 2
 

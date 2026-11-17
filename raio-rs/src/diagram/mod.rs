@@ -113,18 +113,17 @@ impl DiagramNode {
 }
 
 impl Diagram {
-    /// Lay the diagram out and write it to an SVG file; the diagram is named after the file.
+    /// Lay the diagram out and write it to an SVG file.
     pub fn write(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
-        let name = path.as_ref().file_stem().unwrap_or_default();
-        std::fs::write(&path, self.to_svg(&name.to_string_lossy()))
+        std::fs::write(&path, self.to_svg())
     }
 
     /// Lay the diagram out and return it as SVG.
-    pub fn to_svg(&self, name: &str) -> String {
+    pub fn to_svg(&self) -> String {
         let laid_out = elkrs::create_elk().layout_json(&self.graph().to_string());
         let laid_out =
             laid_out.unwrap_or_else(|error| panic!("cannot lay out the diagram: {error}"));
-        svg::draw(name, self, &laid_out)
+        svg::draw(self, &laid_out)
     }
 
     /// Describe the diagram as a graph for elkrs: the nodes with their sizes and the places of
@@ -192,8 +191,7 @@ impl Diagram {
                 "elk.algorithm": "layered",
                 "elk.direction": "RIGHT",
                 "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
-                // The top leaves room for the name of the diagram.
-                "elk.padding": "[top=26,left=12,bottom=12,right=12]",
+                "elk.padding": "[top=12,left=12,bottom=12,right=12]",
             },
         })
     }
@@ -302,10 +300,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_diagram_draws_every_node_port_task_and_connection() {
-        let svg = robot().to_svg("robot");
+        let svg = robot().to_svg();
         // A node has its name at its top and its id in its corner.
         let texts = [
-            "robot", "Camera", "0", "Logger", "2", "capture", "report", "keys", "10ms",
+            "Camera", "0", "Logger", "2", "capture", "report", "keys", "10ms",
         ];
         for text in texts {
             assert!(
@@ -322,7 +320,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_same_app_gives_the_same_diagram() {
-        assert_eq!(robot().to_svg("robot"), robot().to_svg("robot"));
+        assert_eq!(robot().to_svg(), robot().to_svg());
     }
 
     #[test]
@@ -331,7 +329,7 @@ pub(crate) mod tests {
             nodes: vec![node("Buffer<Vec<u8>> & co", &[], &[])],
             connections: Vec::new(),
         };
-        let svg = diagram.to_svg("a");
+        let svg = diagram.to_svg();
         assert!(svg.contains(">Buffer&lt;Vec&lt;u8&gt;&gt; &amp; co</text>"));
     }
 }

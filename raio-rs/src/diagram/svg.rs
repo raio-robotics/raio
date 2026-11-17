@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::{Diagram, DiagramNode, PADDING, PortKind, TITLE_HEIGHT};
 
-/// The font size of the names of the diagram and of its nodes.
+/// The font size of the name of a node.
 pub(super) const TITLE_SIZE: f64 = 10.0;
 /// The font size of every other text.
 pub(super) const LABEL_SIZE: f64 = 8.0;
@@ -196,8 +196,8 @@ fn draw_connection(svg: &mut String, edge: &Value) {
     }
 }
 
-/// Draw the diagram on a white frame that carries its name.
-pub(super) fn draw(name: &str, diagram: &Diagram, laid_out: &Value) -> String {
+/// Draw the diagram on a white frame.
+pub(super) fn draw(diagram: &Diagram, laid_out: &Value) -> String {
     let (width, height) = (number(laid_out, "width"), number(laid_out, "height"));
     let mut svg = String::new();
     writeln!(
@@ -214,7 +214,6 @@ pub(super) fn draw(name: &str, diagram: &Diagram, laid_out: &Value) -> String {
         height - 1.0
     )
     .unwrap();
-    text(&mut svg, 2.0 * PADDING, 13.0, TITLE_SIZE, "start", name);
     // elkrs leaves out a list that is empty.
     for edge in laid_out["edges"].as_array().into_iter().flatten() {
         draw_connection(&mut svg, edge);
