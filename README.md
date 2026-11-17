@@ -176,7 +176,7 @@ node that waits for a slow sender does not advance. These are the places where y
 ## Diagram
 
 `diagram` draws an app to an SVG file in the style of Lingua Franca: each node with its ports
-and its tasks, and each connection with its delay. [elkrs](https://github.com/depetrol/elkrs)
+and its tasks, and each connection with its delay. A physical connection is a dashed line. [elkrs](https://github.com/depetrol/elkrs)
 places the nodes and routes the connections. To see one, run
 `cargo run --example diagram -- app.svg`.
 

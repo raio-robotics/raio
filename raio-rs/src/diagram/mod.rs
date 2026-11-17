@@ -320,6 +320,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn only_a_physical_connection_is_a_dashed_line() {
+        assert_eq!(robot().to_svg().matches("stroke-dasharray").count(), 0);
+        let mut diagram = robot();
+        diagram.connections[2].physical = true;
+        let svg = diagram.to_svg();
+        assert_eq!(svg.matches("class=\"connection\"").count(), 3);
+        assert_eq!(svg.matches("stroke-dasharray").count(), 1);
+    }
+
+    #[test]
     fn the_same_app_gives_the_same_diagram() {
         assert_eq!(robot().to_svg(), robot().to_svg());
     }

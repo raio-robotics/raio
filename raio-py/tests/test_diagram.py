@@ -48,6 +48,15 @@ def test_a_diagram_shows_an_action_inside_its_node_and_a_reaction_among_the_task
     assert svg.count('class="action"') == 1 and svg.count('class="task"') == 2
 
 
+def test_a_diagram_draws_a_physical_connection_as_a_dashed_line(tmp_path):
+    ticker, near, far = Ticker(1 * MS, 1), Printer("near"), Printer("far")
+    raio.connect(ticker.out, near.inp)
+    raio.connect(ticker.out, far.inp, physical=True)
+    raio.diagram(tmp_path / "app.svg", ticker, near, far)
+    svg = (tmp_path / "app.svg").read_text()
+    assert svg.count('class="connection"') == 2 and svg.count("stroke-dasharray") == 1
+
+
 def test_the_same_app_gives_the_same_diagram(tmp_path):
     ticker, printer = Ticker(1 * MS, 3), Printer()
     raio.connect(ticker.out, printer.inp)

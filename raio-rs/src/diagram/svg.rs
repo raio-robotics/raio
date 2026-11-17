@@ -148,8 +148,9 @@ fn draw_node(svg: &mut String, node_id: usize, node: &DiagramNode, placed: &Valu
     }
 }
 
-/// Draw a connection: its line, a dot where it leaves a line that it shares, and its delay.
-fn draw_connection(svg: &mut String, edge: &Value) {
+/// Draw a connection: its line, which is dashed if the connection is physical, a dot where it
+/// leaves a line that it shares, and its delay.
+fn draw_connection(svg: &mut String, edge: &Value, physical: bool) {
     let section = &edge["sections"][0];
     let bends = section["bendPoints"].as_array().into_iter().flatten();
     let line = once(&section["startPoint"])
@@ -158,9 +159,13 @@ fn draw_connection(svg: &mut String, edge: &Value) {
     let line: Vec<_> = line
         .map(|point| (number(point, "x"), number(point, "y")))
         .collect();
+    let dashes = match physical {
+        true => r#" stroke-dasharray="4 3""#,
+        false => "",
+    };
     writeln!(
         svg,
-        r#"<polyline class="connection" points="{}" fill="none" stroke="black"/>"#,
+        r#"<polyline class="connection" points="{}" fill="none" stroke="black"{dashes}/>"#,
         points(&line)
     )
     .unwrap();
@@ -216,7 +221,9 @@ pub(super) fn draw(diagram: &Diagram, laid_out: &Value) -> String {
     .unwrap();
     // elkrs leaves out a list that is empty.
     for edge in laid_out["edges"].as_array().into_iter().flatten() {
-        draw_connection(&mut svg, edge);
+        // The edge's id ends with the position of its connection.
+        let position: usize = edge["id"].as_str().unwrap()[1..].parse().unwrap();
+        draw_connection(&mut svg, edge, diagram.connections[position].physical);
     }
     let placed = laid_out["children"].as_array().into_iter().flatten();
     for (node_id, (node, placed)) in diagram.nodes.iter().zip(placed).enumerate() {
