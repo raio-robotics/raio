@@ -16,6 +16,6 @@ name = "raio"
 async-net = "2.0.0"
 bincode = {version = "2", features = ["serde"]}
 futures = "0.3.34"
-serde = "1.0.229"
+serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0.151"
 
