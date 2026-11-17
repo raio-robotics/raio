@@ -127,3 +127,29 @@ fn action() {
          echo o (physical: true)\n"
     );
 }
+
+#[test]
+fn foreign() {
+    let stdout = run_example("foreign");
+    let (echoed, node_time) = stdout.rsplit_once("node time: ").unwrap();
+    assert_eq!(
+        echoed,
+        "start work at 1s (physical: false)\n\
+         got 42 (physical: true)\n"
+    );
+    // The result came in on the wall clock: the node resumed at a tag after 1s.
+    assert!(nanos(node_time.trim()) > 1_000_000_000, "{node_time}");
+}
+
+/// Parse a `Time` as displayed: a number followed by one of its units.
+fn nanos(time: &str) -> i64 {
+    let digits = time.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let scale = match &time[digits.len()..] {
+        "ns" => 1,
+        "us" => 1_000,
+        "ms" => 1_000_000,
+        "s" => 1_000_000_000,
+        unit => panic!("unexpected unit {unit:?} in {time:?}"),
+    };
+    digits.parse::<i64>().unwrap() * scale
+}

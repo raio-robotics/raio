@@ -13,10 +13,14 @@ use crate::time::Time;
 /// receives it, and is read like an input port.
 pub struct Action<T> {
     pub(crate) port: InputPort<T>,
-    /// Handed to the first handle; `None` once handles exist or the action has closed.
-    pub(crate) initial: RefCell<Option<Arc<UnboundedSender<T>>>>,
-    /// The sender every live handle shares.
-    pub(crate) live: RefCell<Weak<UnboundedSender<T>>>,
+    pub(crate) handles: RefCell<Handles<T>>,
+}
+
+/// The sender the handles share. The action holds it until the first handle is made;
+/// after that only the handles do, so the last one dropping closes the channel.
+pub(crate) enum Handles<T> {
+    Unused(Arc<UnboundedSender<T>>),
+    Live(Weak<UnboundedSender<T>>),
 }
 
 impl<T> Action<T> {
@@ -24,19 +28,14 @@ impl<T> Action<T> {
     /// the constructor also runs in the launcher process. Dropping the last handle
     /// closes the action.
     pub fn handle(&self) -> ActionHandle<T> {
-        let live = self.live.borrow().upgrade();
-        let sender = match live {
-            Some(sender) => sender,
-            None => {
-                let sender = self
-                    .initial
-                    .borrow_mut()
-                    .take()
-                    .expect("action is closed: every handle was dropped");
-                *self.live.borrow_mut() = Arc::downgrade(&sender);
-                sender
-            }
+        let mut handles = self.handles.borrow_mut();
+        let sender = match &*handles {
+            Handles::Unused(sender) => sender.clone(),
+            Handles::Live(sender) => sender
+                .upgrade()
+                .expect("action is closed: every handle was dropped"),
         };
+        *handles = Handles::Live(Arc::downgrade(&sender));
         ActionHandle { sender }
     }
 
@@ -101,8 +100,8 @@ mod tests {
     fn values_arrive_physically_in_send_order_until_the_last_handle_drops() {
         let (runtime, ctx, mut builder) = rig();
         let action = Rc::new(builder.action::<i64>());
-        for task in std::mem::take(&mut builder.action_tasks) {
-            runtime.spawn(task);
+        for task in std::mem::take(&mut builder.tasks) {
+            runtime.spawn_internal(task);
         }
         assert_eq!(ctx.ent(), Time::FOREVER); // an action is never promised
 
@@ -117,16 +116,13 @@ mod tests {
 
         let seen = Rc::new(RefCell::new(Vec::new()));
         let (out, task_ctx, task_action) = (seen.clone(), ctx.clone(), action.clone());
-        let idle_ctx = ctx.clone();
-        runtime.block_on_with_idle(
-            async move {
-                while let Some((value, tag)) = task_action.wait().await {
-                    out.borrow_mut().push((*value, tag, task_ctx.physical()));
-                    assert_eq!(task_ctx.ent(), Time::FOREVER);
-                }
-            },
-            move || idle_ctx.try_advance(),
-        );
+        ctx.run_user(async move {
+            while let Some((value, tag)) = task_action.wait().await {
+                out.borrow_mut()
+                    .push((*value, tag, task_ctx.physical.get()));
+                assert_eq!(task_ctx.ent(), Time::FOREVER);
+            }
+        });
         worker.join().unwrap();
 
         let seen = seen.borrow();

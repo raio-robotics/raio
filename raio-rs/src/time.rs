@@ -3,37 +3,53 @@ use std::fmt;
 use std::ops::{Add, Mul, Sub};
 use std::time::Duration;
 
+/// A point in logical time, or a duration. Points are superdense: `(nanos, microstep)`,
+/// ordered by nanos first. Microsteps order events that share a nanosecond, so a tag
+/// right after `now` always exists without moving the clock.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
-pub struct Time(i64);
+pub struct Time {
+    nanos: i64,
+    microstep: u32,
+}
 
 impl Time {
-    pub const ZERO: Time = Time(0);
-    pub const NEVER: Time = Time(i64::MIN);
-    pub const FOREVER: Time = Time(i64::MAX);
+    pub const ZERO: Time = Time::new(0);
+    pub const NEVER: Time = Time::new(i64::MIN);
+    pub const FOREVER: Time = Time::new(i64::MAX);
 
-    pub fn new(nanos: i64) -> Self {
-        Time(nanos)
+    pub const fn new(nanos: i64) -> Self {
+        Time {
+            nanos,
+            microstep: 0,
+        }
     }
 
     pub fn nanos(&self) -> i64 {
-        self.0
+        self.nanos
+    }
+
+    pub fn microstep(&self) -> u32 {
+        self.microstep
     }
 
     pub fn duration(&self) -> Duration {
-        Duration::from_nanos(self.0 as u64)
+        Duration::from_nanos(self.nanos as u64)
     }
 
-    pub fn after(self, delay: Time) -> Time {
-        if self == Time::NEVER || delay == Time::NEVER {
-            return Time::NEVER;
+    /// The tag right after this one: the same nanosecond, one microstep later.
+    pub fn next_microstep(self) -> Time {
+        if self == Time::NEVER || self == Time::FOREVER {
+            return self;
         }
-        if self == Time::FOREVER || delay == Time::FOREVER {
-            return Time::FOREVER;
+        Time {
+            nanos: self.nanos,
+            microstep: self.microstep + 1,
         }
-        Time(self.0 + delay.0)
     }
 }
 
+/// A delay of zero keeps the microstep; any other delay reaches a new nanosecond, whose
+/// first microstep is 0.
 impl Add for Time {
     type Output = Time;
     fn add(self, rhs: Time) -> Time {
@@ -43,7 +59,14 @@ impl Add for Time {
         if self == Time::FOREVER || rhs == Time::FOREVER {
             return Time::FOREVER;
         }
-        Time(self.0 + rhs.0)
+        Time {
+            nanos: self.nanos + rhs.nanos,
+            microstep: if rhs.nanos == 0 {
+                self.microstep + rhs.microstep
+            } else {
+                0
+            },
+        }
     }
 }
 
@@ -59,7 +82,7 @@ impl Sub for Time {
         if self == Time::FOREVER {
             return Time::FOREVER;
         }
-        Time(self.0 - rhs.0)
+        Time::new(self.nanos - rhs.nanos)
     }
 }
 
@@ -72,7 +95,7 @@ impl Mul<i64> for Time {
         if self == Time::FOREVER {
             return Time::FOREVER;
         }
-        Time(self.0 * rhs)
+        Time::new(self.nanos * rhs)
     }
 }
 
@@ -90,6 +113,9 @@ impl fmt::Display for Time {
             Time::FOREVER => return write!(f, "FOREVER"),
             _ => {}
         }
+        if self.microstep > 0 {
+            return write!(f, "({}, {})", Time::new(self.nanos), self.microstep);
+        }
         for (unit, name) in [
             (HOUR, "h"),
             (MINUTE, "min"),
@@ -97,21 +123,21 @@ impl fmt::Display for Time {
             (MS, "ms"),
             (US, "us"),
         ] {
-            if self.0 != 0 && self.0 % unit.0 == 0 {
-                return write!(f, "{}{}", self.0 / unit.0, name);
+            if self.nanos != 0 && self.nanos % unit.nanos == 0 {
+                return write!(f, "{}{}", self.nanos / unit.nanos, name);
             }
         }
-        write!(f, "{}ns", self.0)
+        write!(f, "{}ns", self.nanos)
     }
 }
 
-pub const NS: Time = Time(1);
-pub const US: Time = Time(1_000);
-pub const MS: Time = Time(1_000_000);
-pub const SECOND: Time = Time(1_000_000_000);
+pub const NS: Time = Time::new(1);
+pub const US: Time = Time::new(1_000);
+pub const MS: Time = Time::new(1_000_000);
+pub const SECOND: Time = Time::new(1_000_000_000);
 pub const S: Time = SECOND;
-pub const MINUTE: Time = Time(60 * 1_000_000_000);
-pub const HOUR: Time = Time(3_600 * 1_000_000_000);
+pub const MINUTE: Time = Time::new(60 * 1_000_000_000);
+pub const HOUR: Time = Time::new(3_600 * 1_000_000_000);
 
 #[cfg(test)]
 mod tests {
@@ -132,6 +158,29 @@ mod tests {
         assert!(Time::NEVER < Time::ZERO);
         assert!(Time::ZERO < NS);
         assert!(S < Time::FOREVER);
+    }
+
+    #[test]
+    fn microsteps_order_within_a_nanosecond() {
+        let tag = 1 * S;
+        assert!(tag < tag.next_microstep());
+        assert!(tag.next_microstep() < tag.next_microstep().next_microstep());
+        assert!(tag.next_microstep() < 1 * S + NS); // any later nanosecond comes after
+    }
+
+    #[test]
+    fn a_delay_resets_the_microstep_and_zero_keeps_it() {
+        let tag = (1 * S).next_microstep();
+        assert_eq!(tag + Time::ZERO, tag);
+        assert_eq!(tag + NS, 1 * S + NS);
+        assert_eq!(tag.microstep(), 1);
+        assert_eq!((tag + NS).microstep(), 0);
+    }
+
+    #[test]
+    fn sentinels_have_no_next_microstep() {
+        assert_eq!(Time::NEVER.next_microstep(), Time::NEVER);
+        assert_eq!(Time::FOREVER.next_microstep(), Time::FOREVER);
     }
 
     #[test]
@@ -161,6 +210,7 @@ mod tests {
         assert_eq!((S * 90).to_string(), "90s");
         assert_eq!((MINUTE * 2).to_string(), "2min");
         assert_eq!(HOUR.to_string(), "1h");
+        assert_eq!((1 * S).next_microstep().to_string(), "(1s, 1)");
         assert_eq!(Time::NEVER.to_string(), "NEVER");
         assert_eq!(Time::FOREVER.to_string(), "FOREVER");
     }

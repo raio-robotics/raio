@@ -4,43 +4,136 @@ use crate::messages::TaggedMessage;
 pub use crate::node::Node;
 use crate::node::{NodeContext, NodeId};
 pub use crate::port::{Builder, InputPort, OutputPort, PortId};
-use crate::port::{InputChannel, OutputChannel, OutputSender};
-use crate::runtime::Runtime;
+use crate::port::{InputChannel, OutputChannel};
+use crate::runtime::{BoxFuture, Runtime};
 use crate::serializer::Serializer;
 use crate::serializer::serde::SerdeSerializer;
 use crate::time::Time;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::{Receiver, Sender, Transport};
 use futures::StreamExt;
-use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+use futures::channel::mpsc::unbounded;
 use futures::future::join_all;
 use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::time::Instant;
 
-type Runner = Box<dyn FnOnce(Rc<Runtime>, Vec<Edge>, String)>;
+type Runner = Box<dyn FnOnce(Rc<Runtime>, Vec<Box<dyn Edge>>, String)>;
 pub type Start<N> = Box<dyn FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>>>;
-pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
-pub(crate) type ReceiverFactory = Box<dyn FnOnce(Box<dyn Fn(Vec<u8>)>) -> BoxFuture<()>>;
-pub(crate) type ListenerFactory = Box<dyn FnOnce() -> BoxFuture<(String, ReceiverFactory)>>;
-pub(crate) type SenderFactory =
-    Box<dyn FnOnce(String, UnboundedReceiver<Vec<u8>>) -> BoxFuture<()>>;
 
-pub struct Edge {
-    pub(crate) from: PortId,
-    pub(crate) to: PortId,
-    pub(crate) serialize: Box<dyn Fn(&Rc<dyn Any>) -> Option<Vec<u8>>>,
-    pub(crate) deliver: Box<dyn Fn(&Rc<dyn Any>, &NodeContext, TaggedMessage)>,
-    pub(crate) close: Box<dyn Fn(&Rc<dyn Any>)>,
-    pub(crate) install_sender: Box<dyn Fn(&Rc<dyn Any>, OutputSender)>,
-    pub(crate) listener_factory: ListenerFactory,
-    pub(crate) sender_factory: SenderFactory,
+/// A connection with its types erased: `App` keeps every edge alike, and the node
+/// process asks each one for its receiver or its sender.
+pub(crate) trait Edge {
+    fn from(&self) -> PortId;
+    fn to(&self) -> PortId;
+    /// Listen for the upstream node. Returns the endpoint to register and the task that
+    /// delivers the upstream's frames to the input `port` until the upstream closes.
+    fn listen(
+        &self,
+        port: Rc<dyn Any>,
+        context: Rc<NodeContext>,
+    ) -> BoxFuture<(String, BoxFuture<()>)>;
+    /// Connect to the downstream node at `endpoint`. Installs the sender on the output
+    /// `port` and returns the task that sends its frames until the port closes.
+    fn connect_to(&self, endpoint: String, port: Rc<dyn Any>) -> BoxFuture<()>;
+}
+
+struct TypedEdge<Tr, T, S> {
+    from: PortId,
+    to: PortId,
+    serializer: Rc<S>,
+    delay: Time,
+    types: PhantomData<fn() -> (Tr, T)>,
+}
+
+/// Queue a received frame on the input channel of an edge with `delay`.
+fn deliver<T, S: Serializer<T>>(
+    serializer: &S,
+    delay: Time,
+    channel: &InputChannel<T>,
+    context: &NodeContext,
+    message: TaggedMessage,
+) {
+    if let Some(bytes) = message.value {
+        let value = serializer.deserialize(&bytes);
+        if message.physical {
+            // A physical value keeps the sender's tag plus the delay, moved only out of
+            // this node's past: the edge delivers in the order it was sent.
+            let tag = (message.timestamp + delay).max(context.now().next_microstep());
+            channel.push_physical(tag, value);
+        } else {
+            channel.push(message.timestamp + delay, value);
+        }
+    }
+    channel.update_remote_ent(message.ent + delay);
+}
+
+impl<Tr: Transport + 'static, T: 'static, S: Serializer<T> + 'static> Edge for TypedEdge<Tr, T, S> {
+    fn from(&self) -> PortId {
+        self.from
+    }
+
+    fn to(&self) -> PortId {
+        self.to
+    }
+
+    fn listen(
+        &self,
+        port: Rc<dyn Any>,
+        context: Rc<NodeContext>,
+    ) -> BoxFuture<(String, BoxFuture<()>)> {
+        let channel = port.downcast::<InputChannel<T>>().unwrap();
+        let (serializer, delay) = (self.serializer.clone(), self.delay);
+        Box::pin(async move {
+            let mut transport = Tr::new().await;
+            let endpoint = transport.endpoint().to_string();
+            let receive: BoxFuture<()> = Box::pin(async move {
+                let (_sender, mut receiver) = transport.accept().await;
+                while let Some(frame) = receiver.recv().await {
+                    let message: TaggedMessage = SerdeSerializer.deserialize(&frame);
+                    deliver(&*serializer, delay, &channel, &context, message);
+                }
+                channel.close();
+            });
+            (endpoint, receive)
+        })
+    }
+
+    fn connect_to(&self, endpoint: String, port: Rc<dyn Any>) -> BoxFuture<()> {
+        let channel = port.downcast::<OutputChannel<T>>().unwrap();
+        let serializer = self.serializer.clone();
+        let (frames, mut queued) = unbounded::<Vec<u8>>();
+        let value_channel = channel.clone();
+        channel
+            .senders
+            .borrow_mut()
+            .push(Box::new(move |timestamp, ent, physical| {
+                let value = value_channel.cell.borrow_mut().take();
+                let message = TaggedMessage {
+                    timestamp,
+                    ent,
+                    physical,
+                    value: value.map(|value| serializer.serialize(&value)),
+                };
+                frames
+                    .unbounded_send(SerdeSerializer.serialize(&message))
+                    .unwrap();
+            }));
+        Box::pin(async move {
+            let (mut sender, _receiver) = Tr::connect(&endpoint).await;
+            while let Some(frame) = queued.next().await {
+                sender.send(&frame).await;
+            }
+        })
+    }
 }
 
 pub struct App {
-    edges: Vec<Edge>,
+    edges: Vec<Box<dyn Edge>>,
     nodes: Vec<Runner>,
 }
 
@@ -76,79 +169,17 @@ impl App {
         S: Serializer<T> + 'static,
     {
         assert!(
-            self.edges.iter().all(|edge| edge.to != to.id),
+            self.edges.iter().all(|edge| edge.to() != to.id),
             "input port {:?} already has an upstream; an input accepts exactly one connection",
             to.id
         );
-        let serializer = Rc::new(serializer);
-        let ser = serializer.clone();
-        let serialize = Box::new(move |cell: &Rc<dyn Any>| {
-            let cell = cell.clone().downcast::<OutputChannel<T>>().unwrap();
-            let taken = cell.cell.borrow_mut().take();
-            taken.map(|value| ser.serialize(&value))
-        });
-        let install_sender = Box::new(|channel: &Rc<dyn Any>, sender: OutputSender| {
-            channel
-                .clone()
-                .downcast::<OutputChannel<T>>()
-                .unwrap()
-                .install_sender(sender);
-        });
-        let deliver = Box::new(
-            move |channel: &Rc<dyn Any>, context: &NodeContext, message: TaggedMessage| {
-                let channel = channel.clone().downcast::<InputChannel<T>>().unwrap();
-                if let Some(bytes) = message.value {
-                    let value = serializer.deserialize(&bytes);
-                    if message.physical {
-                        // The sender's tag means nothing here: the value is retagged on arrival.
-                        channel.push_physical(context.physical_tag(delay), value);
-                    } else {
-                        channel.push(message.timestamp + delay, value);
-                    }
-                }
-                channel.update_remote_ent(message.ent + delay);
-            },
-        );
-        let close = Box::new(|channel: &Rc<dyn Any>| {
-            channel
-                .clone()
-                .downcast::<InputChannel<T>>()
-                .unwrap()
-                .close();
-        });
-        let listener_factory: ListenerFactory = Box::new(|| {
-            Box::pin(async {
-                let mut transport = Tr::new().await;
-                let endpoint = transport.endpoint().to_string();
-                let receiver_factory: ReceiverFactory = Box::new(move |deliver| {
-                    Box::pin(async move {
-                        let (_sender, mut receiver) = transport.accept().await;
-                        while let Some(frame) = receiver.recv().await {
-                            deliver(frame);
-                        }
-                    })
-                });
-                (endpoint, receiver_factory)
-            })
-        });
-        let sender_factory: SenderFactory = Box::new(|endpoint, mut frames| {
-            Box::pin(async move {
-                let (mut sender, _receiver) = Tr::connect(&endpoint).await;
-                while let Some(frame) = frames.next().await {
-                    sender.send(&frame).await;
-                }
-            })
-        });
-        self.edges.push(Edge {
+        self.edges.push(Box::new(TypedEdge::<Tr, T, S> {
             from: from.id,
             to: to.id,
-            serialize,
-            deliver,
-            close,
-            install_sender,
-            listener_factory,
-            sender_factory,
-        });
+            serializer: Rc::new(serializer),
+            delay,
+            types: PhantomData,
+        }));
     }
 
     pub fn create_node<N: 'static>(
@@ -160,39 +191,35 @@ impl App {
         let node_context = Rc::new(NodeContext::new(Rc::new(Runtime::new())));
         let mut builder = Builder::new(node_id, node_context);
         let handle = constructor(&mut builder);
-        let ports = builder.port_count();
+        let ports = builder.next_port_id;
         self.nodes
             .push(Box::new(move |runtime, edges, coordinator_endpoint| {
                 let node_context = Rc::new(NodeContext::new(runtime.clone()));
                 let mut builder = Builder::new(node_id, node_context.clone());
                 let node = Rc::new(constructor(&mut builder));
                 assert!(
-                    builder.port_count() == ports,
+                    builder.next_port_id == ports,
                     "node {node_id}: constructor created a different number of ports \
                  than on its first run; constructors must be deterministic"
                 );
                 let ports = std::mem::take(&mut builder.ports);
-                for task in std::mem::take(&mut builder.action_tasks) {
-                    runtime.spawn(task);
+                let inputs = std::mem::take(&mut builder.inputs);
+                for task in std::mem::take(&mut builder.tasks) {
+                    runtime.spawn_internal(task);
                 }
-                let futures: Vec<_> = starts
+                let frame_transfer = runtime.block_on(connect(
+                    node_context.clone(),
+                    node_id,
+                    coordinator_endpoint,
+                    edges,
+                    ports,
+                    inputs,
+                ));
+                let tasks = starts
                     .into_iter()
                     .map(|start| start(node.clone()))
                     .collect();
-                let idle_context = node_context.clone();
-                runtime.block_on_with_idle(
-                    run_node(
-                        node_context,
-                        node_id,
-                        coordinator_endpoint,
-                        edges,
-                        ports,
-                        Box::pin(async move {
-                            join_all(futures).await;
-                        }),
-                    ),
-                    move || idle_context.try_advance(),
-                );
+                node_context.run(frame_transfer, tasks);
             }));
         handle
     }
@@ -239,101 +266,53 @@ impl App {
     }
 }
 
-async fn run_node(
+/// Connect the node: listen for its inputs, register with the coordinator, connect to
+/// its outputs. Returns the task that then sends and receives frames until every edge
+/// has closed.
+async fn connect(
     context: Rc<NodeContext>,
     node_id: NodeId,
     coordinator_endpoint: String,
-    edges: Vec<Edge>,
+    edges: Vec<Box<dyn Edge>>,
     ports: HashMap<PortId, Rc<dyn Any>>,
-    start: BoxFuture<()>,
-) {
-    let mut in_edges = Vec::new();
-    let mut out_edges = Vec::new();
-    for edge in edges {
-        let Edge {
-            from,
-            to,
-            serialize,
-            deliver,
-            close,
-            install_sender,
-            listener_factory,
-            sender_factory,
-        } = edge;
-        if to.node_id == node_id {
-            in_edges.push((to, deliver, close, listener_factory));
-        }
-        if from.node_id == node_id {
-            out_edges.push((from, to, serialize, install_sender, sender_factory));
-        }
+    inputs: Vec<PortId>,
+) -> BoxFuture<()> {
+    for input in &inputs {
+        // An input without an upstream would promise nothing beyond tag 0 and hold the
+        // node there forever.
+        assert!(
+            edges.iter().any(|edge| edge.to() == *input),
+            "input port {input:?} has no upstream; connect it with App::connect"
+        );
     }
+    let port = |id: PortId| {
+        ports
+            .get(&id)
+            .unwrap_or_else(|| panic!("port {id:?} was never built by its node's constructor"))
+            .clone()
+    };
 
     let mut endpoints = HashMap::new();
-    let mut receivers = Vec::new();
-    for (to, deliver, close, listener_factory) in in_edges {
-        let (endpoint, receiver_factory) = listener_factory().await;
-        endpoints.insert(to, endpoint);
-        receivers.push((to, deliver, close, receiver_factory));
+    let mut receives = Vec::new();
+    for edge in edges.iter().filter(|edge| edge.to().node_id == node_id) {
+        let (endpoint, receive) = edge.listen(port(edge.to()), context.clone()).await;
+        endpoints.insert(edge.to(), endpoint);
+        receives.push(receive);
     }
 
     let table =
         register::<TcpTransport, _>(&SerdeSerializer, &coordinator_endpoint, node_id, endpoints)
             .await;
+    context.start_time.set(Instant::now());
 
-    context.update_start_time();
-
-    let mut send_futures = Vec::new();
-    for (from, to, serialize, install_sender, sender_factory) in out_edges {
-        let (frames, drain) = unbounded::<Vec<u8>>();
-        let channel = ports
-            .get(&from)
-            .unwrap_or_else(|| panic!("port {from:?} was never built by its node's constructor"))
-            .clone();
-        let sender_channel = channel.clone();
-        install_sender(
-            &channel,
-            Box::new(move |completed, promise, physical| {
-                let message = TaggedMessage {
-                    timestamp: completed,
-                    value: serialize(&sender_channel),
-                    ent: promise,
-                    physical,
-                };
-                frames
-                    .unbounded_send(SerdeSerializer.serialize(&message))
-                    .unwrap();
-            }),
-        );
-        let endpoint = table.get(&to).unwrap().clone();
-        send_futures.push(sender_factory(endpoint, drain));
-    }
-
-    let mut receive_futures = Vec::new();
-    for (to, deliver, close, receiver_factory) in receivers {
-        let channel = ports
-            .get(&to)
-            .unwrap_or_else(|| panic!("port {to:?} was never built by its node's constructor"))
-            .clone();
-        let channel_at_eof = channel.clone();
-        let deliver_context = context.clone();
-        receive_futures.push(async move {
-            receiver_factory(Box::new(move |frame| {
-                let message: TaggedMessage = SerdeSerializer.deserialize(&frame);
-                deliver(&channel, &deliver_context, message);
-            }))
-            .await;
-            close(&channel_at_eof);
-        });
-    }
-
-    let shutdown_context = context.clone();
-    let main = async move {
-        start.await;
-        shutdown_context.send_events(shutdown_context.now(), Time::FOREVER);
-        shutdown_context.close_event_drains();
-    };
-
-    futures::join!(main, join_all(send_futures), join_all(receive_futures));
+    let sends: Vec<_> = edges
+        .iter()
+        .filter(|edge| edge.from().node_id == node_id)
+        .map(|edge| edge.connect_to(table[&edge.to()].clone(), port(edge.from())))
+        .collect();
+    Box::pin(async move {
+        futures::join!(join_all(sends), join_all(receives));
+    })
 }
 
 #[macro_export]
@@ -351,58 +330,83 @@ macro_rules! register {
 mod tests {
     use super::*;
     use crate::node::EventSource;
-    use crate::time::{MS, NS, S};
-    use std::time::{Duration, Instant};
+    use crate::time::{MS, S};
 
-    /// One 10ms edge into a node whose clock stands at 5s.
-    fn edge_into_node_at_5s() -> (App, Rc<NodeContext>, Rc<InputChannel<i64>>) {
-        let mut app = App::new();
+    /// A node whose clock stands at 5s, receiving over a 10ms edge.
+    fn node_at_5s() -> (Rc<NodeContext>, InputChannel<i64>) {
         let ctx = Rc::new(NodeContext::new(Rc::new(Runtime::new())));
-        let mut builder = Builder::new(0, ctx.clone());
-        let out: OutputPort<i64> = builder.output();
-        let input: InputPort<i64> = builder.input();
-        app.connect_with::<TcpTransport, _, _>(&out, &input, SerdeSerializer, 10 * MS);
         ctx.advance_to(5 * S);
-        (app, ctx, input.channel.clone())
+        (ctx, InputChannel::new())
     }
 
-    fn frame(timestamp: Time, ent: Time, physical: bool) -> TaggedMessage {
-        TaggedMessage {
+    fn receive(
+        ctx: &NodeContext,
+        channel: &InputChannel<i64>,
+        timestamp: Time,
+        ent: Time,
+        physical: bool,
+    ) {
+        let message = TaggedMessage {
             timestamp,
             ent,
             physical,
             value: Some(SerdeSerializer.serialize(&7i64)),
-        }
+        };
+        deliver(&SerdeSerializer, 10 * MS, channel, ctx, message);
     }
 
     #[test]
     fn a_logical_frame_keeps_its_tag_plus_the_delay() {
-        let (app, ctx, channel) = edge_into_node_at_5s();
-        let any = channel.clone() as Rc<dyn Any>;
-        (app.edges[0].deliver)(&any, &ctx, frame(7 * S, 6 * S, false));
+        let (ctx, channel) = node_at_5s();
+        receive(&ctx, &channel, 7 * S, 6 * S, false);
         assert_eq!(channel.ready(), Some(7 * S + 10 * MS));
         assert_eq!(channel.ent(), 6 * S + 10 * MS);
     }
 
     #[test]
-    fn a_physical_frame_is_restamped_on_arrival() {
-        let (app, ctx, channel) = edge_into_node_at_5s();
-        let any = channel.clone() as Rc<dyn Any>;
-        // The sender's tag (1s) and this node's wall clock (~0) are both in its past.
-        (app.edges[0].deliver)(&any, &ctx, frame(1 * S, 6 * S, true));
-        assert_eq!(channel.ready(), Some(5 * S + NS));
+    fn a_physical_frame_from_this_nodes_past_is_moved_right_after_now() {
+        let (ctx, channel) = node_at_5s();
+        receive(&ctx, &channel, 1 * S, 6 * S, true); // 1s + 10ms is in the past
+        assert_eq!(channel.ready(), Some((5 * S).next_microstep()));
         assert_eq!(channel.ent(), 6 * S + 10 * MS); // the promise is unaffected
     }
 
     #[test]
-    fn a_physical_frame_takes_the_wall_clock_when_it_is_later() {
-        let (app, ctx, channel) = edge_into_node_at_5s();
-        let any = channel.clone() as Rc<dyn Any>;
-        ctx.start_time.set(Instant::now() - Duration::from_secs(9)); // 9s of wall time have passed
-        // The promise (20s) is past the stamp, so the head is in hand.
-        (app.edges[0].deliver)(&any, &ctx, frame(1 * S, 20 * S, true));
-        let stamp = channel.ready().unwrap();
-        assert!(stamp >= 9 * S + 10 * MS, "{stamp}");
-        assert!(stamp < 10 * S, "{stamp}");
+    fn a_physical_frame_keeps_the_senders_tag_plus_the_delay() {
+        let (ctx, channel) = node_at_5s();
+        receive(&ctx, &channel, 7 * S, 20 * S, true);
+        assert_eq!(channel.ready(), Some(7 * S + 10 * MS));
+    }
+
+    #[test]
+    fn an_edge_delivers_in_the_order_it_was_sent() {
+        let (ctx, channel) = node_at_5s();
+        receive(&ctx, &channel, 1 * S, 6 * S, true); // past: moved to (5s, 1)
+        receive(&ctx, &channel, 2 * S, 6 * S, true); // past: moved behind it, (5s, 2)
+        receive(&ctx, &channel, 6 * S, 20 * S, false); // 6s + 10ms, after both
+        let after_now = (5 * S).next_microstep();
+        for expected in [after_now, after_now.next_microstep(), 6 * S + 10 * MS] {
+            assert_eq!(channel.ready(), Some(expected));
+            channel.wake_wakers(expected);
+        }
+        assert_eq!(channel.ready(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no upstream")]
+    fn an_unconnected_input_is_a_wiring_bug() {
+        let runtime = Rc::new(Runtime::new());
+        let ctx = Rc::new(NodeContext::new(runtime.clone()));
+        let mut builder = Builder::new(0, ctx.clone());
+        let _input: InputPort<i64> = builder.input();
+        let inputs = std::mem::take(&mut builder.inputs);
+        let _frame_transfer = runtime.block_on(connect(
+            ctx,
+            0,
+            "unused".into(),
+            Vec::new(),
+            HashMap::new(),
+            inputs,
+        ));
     }
 }
