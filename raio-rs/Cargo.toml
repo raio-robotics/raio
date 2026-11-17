@@ -14,5 +14,8 @@ name = "raio"
 
 [dependencies]
 async-net = "2.0.0"
+bincode = {version = "2", features = ["serde"]}
 futures = "0.3.34"
+serde = "1.0.229"
+serde_json = "1.0.151"
 

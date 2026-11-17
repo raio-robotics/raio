@@ -1,6 +1,7 @@
 pub mod app;
 pub mod port;
 pub mod runtime;
+pub mod serializer;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
