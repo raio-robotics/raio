@@ -46,6 +46,17 @@ impl Node {
         self.scheduler.aborted.set(true);
     }
 
+    /// Ask every node of the app to shut down a microstep after the latest of their current tags.
+    pub fn request_shutdown(&self) {
+        self.request_shutdown_after(Time::ZERO.next_microstep());
+    }
+
+    /// Ask every node of the app to shut down `delay` after the latest of their current tags.
+    pub fn request_shutdown_after(&self, delay: Time) {
+        assert!(delay > Time::ZERO, "a shutdown needs a positive delay");
+        self.scheduler.request_shutdown(delay);
+    }
+
     pub async fn wait(&self, duration: Time) -> Time {
         assert!(duration > Time::ZERO, "wait needs a positive duration");
         let target = self.scheduler.now() + duration;

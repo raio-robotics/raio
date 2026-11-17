@@ -174,6 +174,25 @@ fn serializer() {
 }
 
 /// Collects what the `node` example sends.
+#[test]
+fn shutdown() {
+    let stdout = run_example("shutdown");
+    let mut lines: Vec<_> = stdout.lines().collect();
+    lines.sort(); // The two nodes print from their own processes.
+    assert_eq!(
+        lines,
+        [
+            "sink got 0 at 1ms",
+            "sink got 1 at 2ms",
+            "sink got 2 at 3ms",
+            "sink got 3 at 4ms",
+            // The ticker asked at 4ms; the tick at 5ms never ran.
+            "sink shut down at (4ms, 1)",
+            "ticker shut down at (4ms, 1)",
+        ]
+    );
+}
+
 struct Collector {
     input: InputPort<String>,
     received: Rc<RefCell<Vec<String>>>,

@@ -39,8 +39,10 @@ struct WakeSender {
 
 impl WakeSender {
     fn send(&self, wake: (TaskId, WakeKind)) {
-        self.sender.send(wake).unwrap();
-        self.notifier.notify();
+        // A wake that outlives its runtime has no task left to reach.
+        if self.sender.send(wake).is_ok() {
+            self.notifier.notify();
+        }
     }
 }
 
@@ -155,6 +157,12 @@ impl Runtime {
         if task.future.as_mut().poll(&mut context).is_pending() {
             self.tasks.borrow_mut().insert(task_id, task);
         }
+    }
+
+    /// Drop every task that has not finished.
+    pub(crate) fn clear(&self) {
+        let tasks = std::mem::take(&mut *self.tasks.borrow_mut());
+        drop(tasks);
     }
 
     /// Run a future to completion, polling all wakes without applying tag scheduling.

@@ -1,5 +1,6 @@
 use crate::driver::AsyncFd;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
+use std::io::ErrorKind;
 use std::net;
 
 use super::{Listener, Receiver, Sender, Transport};
@@ -73,9 +74,10 @@ pub struct TcpSender {
 
 impl Sender for TcpSender {
     async fn send(&mut self, msg: &[u8]) {
-        let len = u32::try_from(msg.len()).unwrap().to_le_bytes();
-        self.stream.write_all(&len).await.unwrap();
-        self.stream.write_all(msg).await.unwrap();
+        // One write per message: a peer that has just exited still accepts it without an error.
+        let mut frame = u32::try_from(msg.len()).unwrap().to_le_bytes().to_vec();
+        frame.extend_from_slice(msg);
+        self.stream.write_all(&frame).await.unwrap();
     }
 
     async fn call(&mut self, request: &[u8]) -> Vec<u8> {
@@ -99,9 +101,13 @@ impl Receiver for TcpReceiver {
 
 async fn read_frame(stream: &mut AsyncFd<net::TcpStream>) -> Option<Vec<u8>> {
     let mut len = [0u8; 4];
-    let n = stream.read(&mut len[..1]).await.unwrap();
+    let n = match stream.read(&mut len[..1]).await {
+        // A peer that exited with unread messages resets the connection.
+        Err(error) if error.kind() == ErrorKind::ConnectionReset => 0,
+        read => read.unwrap(),
+    };
     if n == 0 {
-        return None; // EOF before a new frame means the peer closed cleanly.
+        return None; // EOF before a new frame means the peer closed.
     }
     stream.read_exact(&mut len[1..]).await.unwrap();
     let mut msg = vec![0u8; u32::from_le_bytes(len) as usize];

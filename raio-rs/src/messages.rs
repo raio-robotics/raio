@@ -43,6 +43,24 @@ pub type Wiring = HashMap<usize, Vec<Downstream>>;
 /// A node's wiring, or the reason the coordinator refused the graph.
 pub type Reply = Result<Wiring, String>;
 
+/// What a node sends its coordinator after it has registered.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub enum NodeMessage {
+    /// Ask the coordinator to shut down every node at one tag, this long after their current tags.
+    RequestShutdown(Time),
+    /// The tag at which the node offers to shut down, in reply to `RequestNodeShutdown`.
+    ShutdownTime(Time),
+}
+
+/// What the coordinator sends a node after its wiring.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub enum CoordinatorMessage {
+    /// Ask the node to offer its current tag plus this delay as its shutdown tag.
+    RequestNodeShutdown(Time),
+    /// Shut down at this tag, the latest that any node offered.
+    Shutdown(Time),
+}
+
 /// A connection's output for one tag, including its ENT promise and optional serialized value.
 ///
 /// The sender adds the connection's delay, so both times are the receiver's.

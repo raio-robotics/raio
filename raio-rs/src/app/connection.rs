@@ -1,18 +1,22 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use futures::future::join_all;
 
 use super::Assignment;
 use super::port::{InputChannel, OutputChannel};
 use crate::coordinator::{SERIALIZER, TRANSPORT, register};
-use crate::messages::{Downstream, Frame, InputInfo, OutputInfo, RegisterNode};
+use crate::messages::{
+    CoordinatorMessage, Downstream, Frame, InputInfo, NodeMessage, OutputInfo, RegisterNode,
+};
 use crate::node::NodeScheduler;
 use crate::runtime::BoxFuture;
 use crate::serializer::Serializer;
 use crate::serializer::bincode::BincodeSerializer;
 use crate::time::Time;
+use crate::transport::{Receiver, Sender};
 
 /// An input port whose payload type is hidden from the node's wiring.
 pub(crate) trait AnyInput {
@@ -118,6 +122,39 @@ impl<T: 'static> AnyOutput for OutputChannel<T> {
     }
 }
 
+/// Carry the node's shutdown request to the coordinator and the coordinator's messages to the node.
+fn coordinator_link(
+    scheduler: Rc<NodeScheduler>,
+    mut sender: impl Sender + 'static,
+    mut receiver: impl Receiver + 'static,
+) -> BoxFuture<()> {
+    let (to_coordinator, mut outgoing) = unbounded::<NodeMessage>();
+    let requests = to_coordinator.clone();
+    *scheduler.shutdown_request.borrow_mut() = Some(Box::new(move |delay| {
+        let request = NodeMessage::RequestShutdown(delay);
+        requests.unbounded_send(request).unwrap();
+    }));
+    Box::pin(async move {
+        let send = async move {
+            while let Some(message) = outgoing.next().await {
+                sender.send(&SERIALIZER.serialize(&message)).await;
+            }
+        };
+        let receive = async move {
+            while let Some(bytes) = receiver.recv().await {
+                match SERIALIZER.deserialize(&bytes) {
+                    CoordinatorMessage::RequestNodeShutdown(delay) => {
+                        let offer = NodeMessage::ShutdownTime(scheduler.offer_shutdown(delay));
+                        to_coordinator.unbounded_send(offer).unwrap();
+                    }
+                    CoordinatorMessage::Shutdown(tag) => scheduler.shut_down_at(tag),
+                }
+            }
+        };
+        futures::join!(send, receive);
+    })
+}
+
 /// Register the node's ports and return the task that transfers frames over all connections.
 pub(crate) async fn connect_node(
     scheduler: Rc<NodeScheduler>,
@@ -144,10 +181,13 @@ pub(crate) async fn connect_node(
     }
 
     let endpoint = &assignment.coordinator_endpoint;
-    let wiring = register(&TRANSPORT, &SERIALIZER, endpoint, registration)
+    let (wiring, sender, receiver) = register(&TRANSPORT, &SERIALIZER, endpoint, registration)
         .await
         .unwrap_or_else(|refusal| panic!("node {}: {refusal}", assignment.node_id));
     scheduler.start();
+    // The link stays open while the node runs; the node does not wait for it.
+    let link = coordinator_link(scheduler.clone(), sender, receiver);
+    scheduler.runtime.spawn_internal(link);
 
     let mut sends = Vec::new();
     for (id, downstreams) in wiring {

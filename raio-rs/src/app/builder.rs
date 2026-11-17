@@ -75,7 +75,7 @@ impl Builder {
 
     /// Select `Realtime` (the default) or `FastForward` pacing for this node.
     pub fn execution_mode(&mut self, execution_mode: ExecutionMode) {
-        self.scheduler.set_execution_mode(execution_mode);
+        self.scheduler.execution_mode.set(execution_mode);
     }
 
     pub fn node(&mut self) -> Node {

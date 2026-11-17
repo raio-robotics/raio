@@ -78,6 +78,7 @@ impl Assignment {
 /// A node that is built and not yet running.
 pub struct CreatedNode<N> {
     node: Rc<N>,
+    scheduler: Rc<NodeScheduler>,
     pub(super) runner: Runner,
 }
 
@@ -99,7 +100,7 @@ impl<N: 'static> CreatedNode<N> {
         let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
         let mut builder = Builder::new(node_id, scheduler.clone());
         let node = Rc::new(constructor(&mut builder));
-        let running = node.clone();
+        let (running, handle) = (node.clone(), scheduler.clone());
         // Wire the node through the coordinator and run it until it finishes.
         let run = move |assignment: Assignment| {
             for task in builder.tasks {
@@ -119,8 +120,17 @@ impl<N: 'static> CreatedNode<N> {
         };
         Self {
             node,
+            scheduler: handle,
             runner: Runner(Rc::new(RefCell::new(Some(Box::new(run))))),
         }
+    }
+
+    /// Run this function once when the node shuts down: at the tag at which the app shuts
+    /// down, where nothing else runs, or at the node's last tag when it finishes on its own.
+    pub fn on_shutdown(self, shutdown: impl FnOnce(&N) + 'static) -> Self {
+        let node = self.node.clone();
+        *self.scheduler.shutdown_function.borrow_mut() = Some(Box::new(move || shutdown(&node)));
+        self
     }
 }
 
@@ -221,6 +231,81 @@ mod tests {
         assert_eq!(coordinator.join().unwrap(), Ok(()));
         source.join().unwrap();
         assert_eq!(sink.join().unwrap(), Some(7));
+    }
+
+    #[test]
+    fn every_node_shuts_down_at_one_tag_and_gets_what_was_sent_before_it() {
+        let port = |node_id| PortId {
+            node_id,
+            port_id: 0,
+        };
+        let graph = Graph {
+            nodes: 2,
+            connections: vec![Connection {
+                from: port(0),
+                to: port(1),
+                delay: Time::ZERO,
+            }],
+        };
+        let (coordinator_endpoint, coordinator) = spawn(graph);
+        let assign = |node_id| Assignment {
+            node_id,
+            coordinator_endpoint: coordinator_endpoint.clone(),
+        };
+
+        let assignment = assign(0);
+        let source = std::thread::spawn(move || {
+            let start: Start<(Node, OutputPort<i64>)> = Box::new(|source| {
+                Box::pin(async move {
+                    // This task never ends on its own.
+                    let mut count = 0;
+                    loop {
+                        source.0.wait(1 * MS).await;
+                        source.1.set(count);
+                        count += 1;
+                    }
+                })
+            });
+            let stopped = Rc::new(std::cell::Cell::new(None));
+            let at = stopped.clone();
+            let source = create_node(|builder| (builder.node(), builder.output()), vec![start])
+                .on_shutdown(move |source| at.set(Some(source.0.now())));
+            run_node_as(assignment, source);
+            stopped.get()
+        });
+        let assignment = assign(1);
+        let sink = std::thread::spawn(move || {
+            let received = Rc::new(RefCell::new(Vec::new()));
+            let seen = received.clone();
+            let start: Start<(Node, InputPort<i64>)> = Box::new(move |sink| {
+                Box::pin(async move {
+                    while let Some((value, tag)) = sink.1.wait().await {
+                        seen.borrow_mut().push(tag);
+                        if *value == 2 {
+                            sink.0.request_shutdown_after(2 * MS);
+                        }
+                    }
+                })
+            });
+            let stopped = Rc::new(std::cell::Cell::new(None));
+            let at = stopped.clone();
+            let sink = create_node(|builder| (builder.node(), builder.input()), vec![start])
+                .on_shutdown(move |sink| at.set(Some(sink.0.now())));
+            run_node_as(assignment, sink);
+            (received.take(), stopped.get())
+        });
+        assert_eq!(coordinator.join().unwrap(), Ok(()));
+        let shutdown = source.join().unwrap().expect("the source shut down");
+        let (received, sink_shutdown) = sink.join().unwrap();
+        assert_eq!(sink_shutdown, Some(shutdown));
+        // The sink got every tick before the shutdown tag, and none at or after it.
+        let ticks: Vec<Time> = (1..)
+            .map(|count| count * MS)
+            .take_while(|tick| *tick < shutdown)
+            .collect();
+        assert_eq!(received, ticks);
+        // The sink asked at 3ms for a shutdown 2ms after the latest node's tag.
+        assert!(shutdown >= 5 * MS, "{shutdown}");
     }
 
     #[test]
