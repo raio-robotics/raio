@@ -24,6 +24,7 @@ impl Ticker {
 }
 
 struct Merge {
+    node: Node,
     left: InputPort<i64>,
     right: InputPort<i64>,
 }
@@ -31,6 +32,7 @@ struct Merge {
 impl Merge {
     fn new(builder: &mut Builder) -> Self {
         Self {
+            node: builder.node(),
             left: builder.input(),
             right: builder.input(),
         }
@@ -38,22 +40,29 @@ impl Merge {
 
     async fn start(self) {
         loop {
-            match select(self.left.pin(), self.right.pin()).await {
-                Either::Left((Some((value, timestamp)), _)) => {
-                    println!("left {} at {}", *value, timestamp);
-                }
-                Either::Right((Some((value, timestamp)), _)) => {
-                    println!("right {} at {}", *value, timestamp);
-                }
-                Either::Left((None, _)) => {
-                    println!("left closed");
-                    break;
-                }
-                Either::Right((None, _)) => {
-                    println!("right closed");
-                    break;
-                }
+            let closed = match select(self.left.pin(), self.right.pin()).await {
+                Either::Left((value, _)) => value.is_none(),
+                Either::Right((value, _)) => value.is_none(),
+            };
+            if closed {
+                break;
             }
+            println!(
+                "{}: left {}, right {}",
+                self.node.now(),
+                self.left
+                    .latest()
+                    .map_or("none".to_string(), |(value, timestamp)| format!(
+                        "{} at {}",
+                        *value, timestamp
+                    )),
+                self.right
+                    .latest()
+                    .map_or("none".to_string(), |(value, timestamp)| format!(
+                        "{} at {}",
+                        *value, timestamp
+                    )),
+            );
         }
     }
 }
