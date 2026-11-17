@@ -1,4 +1,4 @@
-use raio::app::{Assignment, Builder, InputPort, run_node};
+use raio::app::{Assignment, Builder, InputPort, create_node, run_node_as};
 use raio::coordinator::Coordinator;
 use raio::graph::{Connection, Graph, PortRef};
 use raio::register;
@@ -239,7 +239,10 @@ fn launch(input: usize) -> Launched {
             input: builder.input(),
             received: seen,
         };
-        run_node(assignment, constructor, register![Collector::start]);
+        run_node_as(
+            assignment,
+            create_node(constructor, register![Collector::start]),
+        );
         received.take()
     });
     (

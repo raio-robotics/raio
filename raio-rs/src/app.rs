@@ -13,12 +13,15 @@ use crate::time::Time;
 use crate::transport::tcp::TcpTransport;
 use futures::channel::mpsc::unbounded;
 use futures::future::join_all;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::rc::Rc;
 
-type Runner = Box<dyn FnOnce(Rc<Runtime>, Assignment)>;
+/// Wires and runs one built node; taken by the one caller that runs it.
+type Runner = Rc<RefCell<Option<Box<dyn FnOnce(Assignment)>>>>;
 pub type Start<N> = Box<dyn FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>>>;
 
 /// Builds an input's frame-receiving task once its upstream is known.
@@ -195,33 +198,18 @@ impl App {
         self.connections.push(connection);
     }
 
+    /// Build a node; the process assigned to it runs this same node.
     pub fn create_node<N: 'static>(
         &mut self,
-        constructor: impl Fn(&mut Builder) -> N + 'static,
+        constructor: impl FnOnce(&mut Builder) -> N,
         starts: Vec<Start<N>>,
-    ) -> N {
+    ) -> CreatedNode<N> {
         let node_id: NodeId = self.nodes.len() as NodeId;
-        let scheduler = Rc::new(NodeScheduler::new(Rc::new(Runtime::new())));
-        let mut builder = Builder::new(node_id, scheduler);
-        // Run the constructor here for wiring and again in the node's child process.
-        let handle = constructor(&mut builder);
-        let ports = builder.next_port_id;
-        let inputs = std::mem::take(&mut builder.inputs);
-        self.inputs
-            .extend(inputs.into_iter().map(|input| (node_id, input)));
-        self.nodes.push(Box::new(move |runtime, assignment| {
-            let constructor = |builder: &mut Builder| {
-                let node = constructor(builder);
-                assert!(
-                    builder.next_port_id == ports,
-                    "node {node_id}: constructor created a different number of ports \
-                 than on its first run; constructors must be deterministic"
-                );
-                node
-            };
-            run_on(runtime, assignment, constructor, starts);
-        }));
-        handle
+        let created = CreatedNode::new(node_id, constructor, starts);
+        let inputs = created.inputs.iter().cloned();
+        self.inputs.extend(inputs.map(|input| (node_id, input)));
+        self.nodes.push(created.runner.clone());
+        created
     }
 
     pub fn run(self) {
@@ -229,7 +217,7 @@ impl App {
         match Assignment::from_args() {
             Some(assignment) => {
                 let runner = self.nodes.into_iter().nth(assignment.node_id).unwrap();
-                runner(Rc::new(Runtime::new()), assignment);
+                run(&runner, assignment);
             }
             None => {
                 let graph = Graph {
@@ -339,39 +327,88 @@ impl Assignment {
     }
 }
 
-/// Run one node in this process until it finishes.
-pub fn run_node<N: 'static>(
-    assignment: Assignment,
-    constructor: impl FnOnce(&mut Builder) -> N,
-    starts: Vec<Start<N>>,
-) {
-    run_on(Rc::new(Runtime::new()), assignment, constructor, starts);
+/// A node that is built and not yet running.
+pub struct CreatedNode<N> {
+    node: Rc<N>,
+    inputs: Vec<Rc<dyn InputEnd>>,
+    runner: Runner,
 }
 
-/// Build a node, wire it through the coordinator, and run it until it finishes.
-fn run_on<N: 'static>(
-    runtime: Rc<Runtime>,
-    assignment: Assignment,
+impl<N> Deref for CreatedNode<N> {
+    type Target = N;
+
+    fn deref(&self) -> &N {
+        &self.node
+    }
+}
+
+impl<N: 'static> CreatedNode<N> {
+    fn new(
+        node_id: NodeId,
+        constructor: impl FnOnce(&mut Builder) -> N,
+        starts: Vec<Start<N>>,
+    ) -> Self {
+        let runtime = Rc::new(Runtime::new());
+        let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
+        let mut builder = Builder::new(node_id, scheduler.clone());
+        let node = Rc::new(constructor(&mut builder));
+        let inputs = builder.inputs.clone();
+        let running = node.clone();
+        // Wire the node through the coordinator and run it until it finishes.
+        let run = move |assignment: Assignment| {
+            for task in builder.tasks {
+                runtime.spawn_internal(task);
+            }
+            let frame_transfer = runtime.block_on(connect(
+                scheduler.clone(),
+                assignment,
+                builder.inputs,
+                builder.outputs,
+            ));
+            let tasks = starts
+                .into_iter()
+                .map(|start| start(running.clone()))
+                .collect();
+            scheduler.run(frame_transfer, tasks);
+        };
+        Self {
+            node,
+            inputs,
+            runner: Rc::new(RefCell::new(Some(Box::new(run)))),
+        }
+    }
+}
+
+fn run(runner: &Runner, assignment: Assignment) {
+    let run = runner.take().expect("the node has already run");
+    run(assignment);
+}
+
+/// Build the node that this program runs; set its ports before `run_node`.
+pub fn create_node<N: 'static>(
     constructor: impl FnOnce(&mut Builder) -> N,
     starts: Vec<Start<N>>,
-) {
-    let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
-    let mut builder = Builder::new(assignment.node_id, scheduler.clone());
-    let node = Rc::new(constructor(&mut builder));
-    for task in std::mem::take(&mut builder.tasks) {
-        runtime.spawn_internal(task);
-    }
-    let frame_transfer = runtime.block_on(connect(
-        scheduler.clone(),
-        assignment,
-        std::mem::take(&mut builder.inputs),
-        std::mem::take(&mut builder.outputs),
-    ));
-    let tasks = starts
-        .into_iter()
-        .map(|start| start(node.clone()))
-        .collect();
-    scheduler.run(frame_transfer, tasks);
+) -> CreatedNode<N> {
+    // The node's id comes with its assignment; its ports do not use it.
+    CreatedNode::new(0, constructor, starts)
+}
+
+/// Run the node as this program's launcher assigned it, until it finishes.
+#[track_caller]
+pub fn run_node<N: 'static>(node: CreatedNode<N>) {
+    let Some(assignment) = Assignment::from_args() else {
+        panic!(
+            "this program is one node of a raio app; a launcher starts it with {} and {}",
+            Assignment::NODE_ID,
+            Assignment::COORDINATOR_ENDPOINT
+        );
+    };
+    run_node_as(assignment, node);
+}
+
+/// Run the node under a given assignment, for nodes that share a process.
+pub fn run_node_as<N: 'static>(assignment: Assignment, node: CreatedNode<N>) {
+    run(&node.runner, assignment);
 }
 
 /// Register the node's ports and return the task that transfers frames over all connections.
@@ -422,7 +459,7 @@ async fn connect(
     })
 }
 
-/// Package async node methods as startup tasks for `App::create_node`.
+/// Package async node methods as startup tasks for `create_node`.
 #[macro_export]
 macro_rules! register {
     ($($start:expr),+ $(,)?) => {
@@ -512,12 +549,17 @@ mod tests {
     #[should_panic(expected = "input port 0 of node 0 has no upstream")]
     fn an_unconnected_input_is_a_wiring_bug() {
         let mut app = App::new();
-        let _input: InputPort<i64> = app.create_node(|builder| builder.input(), Vec::new());
+        let _input: CreatedNode<InputPort<i64>> =
+            app.create_node(|builder| builder.input(), Vec::new());
         app.check_wiring();
     }
 
     /// Create an app with a source and a sink node, and return their ports.
-    fn pair() -> (App, OutputPort<i64>, InputPort<i64>) {
+    fn pair() -> (
+        App,
+        CreatedNode<OutputPort<i64>>,
+        CreatedNode<InputPort<i64>>,
+    ) {
         let mut app = App::new();
         let out = app.create_node(|builder| builder.output(), Vec::new());
         let input = app.create_node(|builder| builder.input(), Vec::new());
@@ -540,7 +582,8 @@ mod tests {
     #[test]
     fn one_output_may_feed_several_inputs() {
         let (mut app, out, input) = pair();
-        let other: InputPort<i64> = app.create_node(|builder| builder.input(), Vec::new());
+        let other: CreatedNode<InputPort<i64>> =
+            app.create_node(|builder| builder.input(), Vec::new());
         app.connect(&out, &input);
         app.connect_with(&out, &other, "bincode", "tcp", 10 * MS);
         app.check_wiring();
@@ -606,39 +649,41 @@ mod tests {
 
         let assignment = assign(0);
         let source = std::thread::spawn(move || {
-            let constructor = |builder: &mut Builder| {
-                let out = builder.output();
-                out.set_serializer(Decimal);
-                out.set_transport(Loopback);
-                (builder.node(), out)
-            };
             let start: Start<(Node, OutputPort<i64>)> = Box::new(|source| {
                 Box::pin(async move {
                     source.0.wait(1 * MS).await;
                     source.1.set(7);
                 })
             });
-            run_node(assignment, constructor, vec![start]);
+            let source = create_node(|builder| (builder.node(), builder.output()), vec![start]);
+            source.1.set_serializer(Decimal);
+            source.1.set_transport(Loopback);
+            run_node_as(assignment, source);
         });
         let assignment = assign(1);
         let sink = std::thread::spawn(move || {
             let received = Rc::new(std::cell::Cell::new(None));
             let seen = received.clone();
-            let constructor = |builder: &mut Builder| {
-                let input = builder.input();
-                input.set_serializer(Decimal);
-                input.set_transport(Loopback);
-                input
-            };
             let start: Start<InputPort<i64>> = Box::new(move |input| {
                 Box::pin(async move { seen.set(input.wait().await.map(|(value, _)| *value)) })
             });
-            run_node(assignment, constructor, vec![start]);
+            let sink = create_node(|builder| builder.input(), vec![start]);
+            sink.set_serializer(Decimal);
+            sink.set_transport(Loopback);
+            run_node_as(assignment, sink);
             received.get()
         });
         assert_eq!(coordinator.join().unwrap(), Ok(()));
         source.join().unwrap();
         assert_eq!(sink.join().unwrap(), Some(7));
+    }
+
+    #[test]
+    #[should_panic(expected = "a launcher starts it with --node_id and --coordinator_endpoint")]
+    fn a_node_program_started_by_hand_says_what_it_needs() {
+        let node: CreatedNode<OutputPort<i64>> =
+            create_node(|builder| builder.output(), Vec::new());
+        run_node(node);
     }
 
     fn program(args: &[&str]) -> Vec<String> {

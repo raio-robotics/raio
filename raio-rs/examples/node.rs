@@ -1,4 +1,4 @@
-use raio::app::{Assignment, Builder, Node, OutputPort, run_node};
+use raio::app::{Builder, Node, OutputPort, create_node, run_node};
 use raio::register;
 use raio::time::MS;
 use std::rc::Rc;
@@ -26,11 +26,10 @@ impl Producer {
 
 /// Run only this node; a launcher starts the program and provides the rest of the app.
 fn main() {
-    let assignment = Assignment::from_args().expect("a launcher starts this node");
     let text = std::env::args().nth(1).expect("usage: node <text>");
-    run_node(
-        assignment,
+    let producer = create_node(
         |builder| Producer::new(builder, text),
         register![Producer::start],
     );
+    run_node(producer);
 }

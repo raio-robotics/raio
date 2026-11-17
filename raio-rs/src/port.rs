@@ -367,7 +367,7 @@ impl<T> OutputPort<T> {
 /// Creates a node's ports, actions, and clock handles using one shared scheduler.
 pub struct Builder {
     node_id: NodeId,
-    pub(crate) next_port_id: usize,
+    next_port_id: usize,
     scheduler: Rc<NodeScheduler>,
     /// Each input port needs exactly one upstream connection.
     pub(crate) inputs: Vec<Rc<dyn InputEnd>>,
