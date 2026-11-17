@@ -27,6 +27,10 @@ class _NodeMeta(type):
             port._node, port._name, port._index = node, name, len(node._ports)
             node._ports.append(port)
             setattr(node, name, port)
+        # The node's own process gets the class with its attributes sorted by name, so the
+        # order in which the class declares its tasks is kept on the node.
+        tasks = declared(cls, lambda value: hasattr(value, "_raio_task"))
+        node._tasks = [name for name, _ in tasks]
         node.__init__(*args, **kwargs)
         return node
 
@@ -41,7 +45,6 @@ def _kinds(node):
 
 
 def _start(node):
-    """Make the node the one this process runs and create its tasks in definition order."""
+    """Make the node the one this process runs and create its tasks in their declared order."""
     states.running = node
-    tasks = declared(type(node), lambda value: hasattr(value, "_raio_task"))
-    return [getattr(node, name)() for name, _ in tasks]
+    return [getattr(node, name)() for name in node._tasks]

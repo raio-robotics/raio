@@ -1,3 +1,5 @@
+mod tests;
+
 use raio::app::{
     Assignment, Builder, Connection, Graph, InputPort, PortId, create_node, run_node_as,
 };
@@ -112,6 +114,20 @@ fn reaction() {
          3600ms: left 3 at 3600ms, right 1 at 2s\n\
          4500ms: left 4 at 4500ms, right 1 at 2s\n\
          5400ms: left 5 at 5400ms, right 1 at 2s\n"
+    );
+}
+
+#[test]
+fn reaction_order() {
+    let stdout = run_example("reaction_order");
+    assert_eq!(
+        stdout,
+        "1ms: first, triggered by b\n\
+         1ms: second, triggered by a\n\
+         1ms: third, triggered by a and b\n\
+         2ms: first, triggered by b\n\
+         2ms: second, triggered by a\n\
+         2ms: third, triggered by a and b\n"
     );
 }
 

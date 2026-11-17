@@ -2,11 +2,11 @@ mod waker;
 
 use crate::driver::{Driver, Notifier};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::task::{Context, Waker};
 use std::time::Instant;
 
@@ -55,6 +55,8 @@ struct Task {
 pub struct Runtime {
     wake_receiver: Receiver<(TaskId, WakeKind)>,
     wake_sender: WakeSender,
+    /// The wakes that were queued together, in the order their tasks were spawned.
+    ready: RefCell<VecDeque<(TaskId, WakeKind)>>,
     tasks: RefCell<HashMap<TaskId, Task>>,
     next_task_id: Cell<TaskId>,
 }
@@ -74,6 +76,7 @@ impl Runtime {
                 sender,
                 notifier: Driver::notifier(),
             },
+            ready: RefCell::new(VecDeque::new()),
             tasks: RefCell::new(HashMap::new()),
             next_task_id: Cell::new(0),
         }
@@ -123,12 +126,17 @@ impl Runtime {
     }
 
     /// Take the next queued task wake without blocking.
+    ///
+    /// Wakes queued together are taken in the order their tasks were spawned. A wake queued
+    /// while they run waits for the next round, so a task that wakes itself starves no other.
     pub(crate) fn next_wake(&self) -> Option<(TaskId, WakeKind)> {
-        match self.wake_receiver.try_recv() {
-            Ok(wake) => Some(wake),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => unreachable!("the runtime holds a sender"),
+        let mut ready = self.ready.borrow_mut();
+        if ready.is_empty() {
+            ready.extend(self.wake_receiver.try_iter());
+            // The sort is stable: the wakes of one task keep the order in which they came.
+            ready.make_contiguous().sort_by_key(|(task, _)| *task);
         }
+        ready.pop_front()
     }
 
     /// Take a queued wake or wait once in the driver; return `None` if no task woke.
@@ -223,6 +231,30 @@ mod tests {
         rt.waker_for(task, WakeKind::Physical).wake();
         assert_eq!(rt.next_wake(), Some((task, WakeKind::Physical)));
         assert_eq!(rt.next_wake(), None);
+    }
+
+    #[test]
+    fn wakes_queued_together_are_taken_in_the_order_their_tasks_were_spawned() {
+        let rt = Runtime::new();
+        let tasks: Vec<_> = (0..4).map(|_| rt.spawn(std::future::pending())).collect();
+        while rt.next_wake().is_some() {} // Discard the wakes that schedule the first polls.
+        for task in tasks.iter().rev() {
+            rt.waker_for(*task, WakeKind::Resume).wake();
+        }
+        let taken: Vec<_> = std::iter::from_fn(|| rt.next_wake()).collect();
+        let spawned: Vec<_> = tasks.iter().map(|task| (*task, WakeKind::Resume)).collect();
+        assert_eq!(taken, spawned);
+    }
+
+    #[test]
+    fn a_wake_queued_during_a_round_waits_for_the_next_round() {
+        let rt = Runtime::new();
+        let (first, second) = (rt.spawn(YieldOnce(false)), rt.spawn(async {}));
+        assert_eq!(rt.next_wake(), Some((first, WakeKind::Resume)));
+        rt.poll(first); // The first task wakes itself.
+        // The second task was woken with the first, so it runs before the first runs again.
+        assert_eq!(rt.next_wake(), Some((second, WakeKind::Resume)));
+        assert_eq!(rt.next_wake().map(|(task, _)| task), Some(first));
     }
 
     #[test]

@@ -9,5 +9,3 @@ pub mod runtime;
 pub mod serializer;
 pub mod time;
 pub mod transport;
-
-pub use futures;

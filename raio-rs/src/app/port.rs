@@ -1,5 +1,5 @@
 use std::cell::{Cell, Ref, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -33,7 +33,8 @@ pub(crate) struct InputChannel<T> {
     /// The last delivered value and its tag.
     latest: RefCell<Option<(Time, T)>>,
     /// Each waiting task has a Resume waker for values and a Physical waker for closure.
-    waiters: RefCell<HashMap<TaskId, (Waker, Waker)>>,
+    /// The tasks wake in the order they were spawned.
+    waiters: RefCell<BTreeMap<TaskId, (Waker, Waker)>>,
     remote_ent: Cell<Time>,
     closed: Cell<bool>,
     pub(crate) setting: PortSetting<T>,
@@ -48,7 +49,7 @@ impl<T> InputChannel<T> {
         Self {
             queue: RefCell::new(BTreeMap::new()),
             latest: RefCell::new(None),
-            waiters: RefCell::new(HashMap::new()),
+            waiters: RefCell::new(BTreeMap::new()),
             remote_ent: Cell::new(Time::ZERO),
             closed: Cell::new(false),
             setting,
@@ -105,14 +106,14 @@ impl<T> InputChannel<T> {
         self.closed.set(true);
         // Closing an empty input resumes its waiters at physical tags.
         if self.queue.borrow().is_empty() {
-            for (_, (_, physical)) in self.waiters.borrow_mut().drain() {
+            for (_, (_, physical)) in std::mem::take(&mut *self.waiters.borrow_mut()) {
                 physical.wake();
             }
         }
     }
 
     fn wake(&self) {
-        for (_, (logical, _)) in self.waiters.borrow_mut().drain() {
+        for (_, (logical, _)) in std::mem::take(&mut *self.waiters.borrow_mut()) {
             logical.wake();
         }
     }
@@ -567,6 +568,28 @@ mod tests {
         rig.settle();
         // The waiter finishes after consuming all values from the closed input.
         assert!(done.get());
+    }
+
+    #[test]
+    fn tasks_that_wait_for_one_input_resume_in_the_order_they_were_spawned() {
+        let rig = Rig::new();
+        let (port, channel) = rig.port();
+        let port = Rc::new(port);
+        let order = Rc::new(RefCell::new(Vec::new()));
+
+        for task in 0..16 {
+            let (port, order) = (port.clone(), order.clone());
+            rig.scheduler.spawn(async move {
+                port.wait().await;
+                order.borrow_mut().push(task);
+            });
+        }
+        rig.settle();
+
+        channel.push(1 * S, 42);
+        channel.update_remote_ent(2 * S);
+        rig.settle();
+        assert_eq!(*order.borrow(), (0..16).collect::<Vec<_>>());
     }
 
     #[test]

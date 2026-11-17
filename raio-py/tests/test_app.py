@@ -110,6 +110,26 @@ def test_a_node_keeps_the_state_its_constructor_set(capfd):
     assert capfd.readouterr().out == "{'hello': [1, 2]} at 0ns\n"
 
 
+def test_tasks_run_in_the_order_they_are_declared(capfd):
+    # A class defined here is sent by value, which sorts its attributes by name.
+    class Pair(Node):
+        @task
+        async def zebra(self):
+            print("zebra starts")
+            await raio.sleep(1 * MS)
+            print("zebra resumes")
+
+        @task
+        async def apple(self):
+            print("apple starts")
+            await raio.sleep(1 * MS)
+            print("apple resumes")
+
+    raio.run(Pair())
+    order = ["zebra starts", "apple starts", "zebra resumes", "apple resumes"]
+    assert capfd.readouterr().out.splitlines() == order
+
+
 def test_an_error_in_a_task_fails_the_app(capfd):
     class Faulty(Node):
         @task

@@ -319,6 +319,39 @@ mod tests {
     }
 
     #[test]
+    fn tasks_woken_at_one_tag_run_in_the_order_they_were_spawned() {
+        let (_runtime, scheduler, _sink) = node_rig();
+        let (first, first_channel) = InputPort::local(&scheduler);
+        let (second, second_channel) = InputPort::local(&scheduler);
+        for channel in [&first_channel, &second_channel] {
+            channel.push(1 * MS, 0);
+            channel.update_remote_ent(Time::FOREVER);
+        }
+        let node = Node {
+            scheduler: scheduler.clone(),
+        };
+        let order = Rc::new(RefCell::new(Vec::new()));
+
+        // The node wakes the task of its alarm first, then the tasks of its inputs as created.
+        let out = order.clone();
+        scheduler.spawn(async move {
+            second.wait().await;
+            out.borrow_mut().push("second input");
+        });
+        let out = order.clone();
+        scheduler.spawn(async move {
+            first.wait().await;
+            out.borrow_mut().push("first input");
+        });
+        let out = order.clone();
+        scheduler.run_user(async move {
+            node.wait(1 * MS).await;
+            out.borrow_mut().push("alarm");
+        });
+        assert_eq!(*order.borrow(), ["second input", "first input", "alarm"]);
+    }
+
+    #[test]
     fn every_due_tag_is_completed_before_the_node_waits() {
         let (_runtime, scheduler, sink) = node_rig();
         let (_port, channel) = InputPort::local(&scheduler);
