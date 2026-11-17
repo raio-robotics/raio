@@ -2,9 +2,11 @@ use crate::driver::AsyncFd;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use std::net;
 
-use super::{Receiver, Sender, Transport};
+use super::{Listener, Receiver, Sender, Transport};
 
-pub struct TcpTransport {
+pub struct TcpTransport;
+
+pub struct TcpListener {
     listener: AsyncFd<net::TcpListener>,
     endpoint: String,
 }
@@ -23,18 +25,33 @@ fn split(stream: net::TcpStream) -> (TcpSender, TcpReceiver) {
 }
 
 impl Transport for TcpTransport {
+    type Listener = TcpListener;
     type Sender = TcpSender;
     type Receiver = TcpReceiver;
 
-    async fn bind() -> Self {
+    fn name(&self) -> &str {
+        "tcp"
+    }
+
+    async fn bind(&self) -> TcpListener {
         let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = listener.local_addr().unwrap().to_string();
-        Self {
+        TcpListener {
             listener: AsyncFd::new(listener).unwrap(),
             endpoint,
         }
     }
+
+    /// Block the runtime thread until the TCP handshake completes.
+    async fn connect(&self, endpoint: &str) -> (TcpSender, TcpReceiver) {
+        split(net::TcpStream::connect(endpoint).unwrap())
+    }
+}
+
+impl Listener for TcpListener {
+    type Sender = TcpSender;
+    type Receiver = TcpReceiver;
 
     fn endpoint(&self) -> &str {
         &self.endpoint
@@ -47,11 +64,6 @@ impl Transport for TcpTransport {
             .await
             .unwrap();
         split(stream)
-    }
-
-    /// Block the runtime thread until the TCP handshake completes.
-    async fn connect(endpoint: &str) -> (TcpSender, TcpReceiver) {
-        split(net::TcpStream::connect(endpoint).unwrap())
     }
 }
 
@@ -105,10 +117,10 @@ mod tests {
     #[test]
     fn frame_round_trip() {
         Runtime::new().block_on(async {
-            let mut t = TcpTransport::bind().await;
-            let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
-            let (_, mut receiver) = t.accept().await;
+            let mut listener = TcpTransport.bind().await;
+            let endpoint = listener.endpoint().to_string();
+            let (mut sender, _) = TcpTransport.connect(&endpoint).await;
+            let (_, mut receiver) = listener.accept().await;
             sender.send(b"hello").await;
             sender.send(b"").await; // Empty frames are valid messages.
             assert_eq!(receiver.recv().await.unwrap(), b"hello");
@@ -122,12 +134,12 @@ mod tests {
     #[test]
     fn send_before_accept_is_buffered() {
         Runtime::new().block_on(async {
-            let mut t = TcpTransport::bind().await;
-            let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
+            let mut listener = TcpTransport.bind().await;
+            let endpoint = listener.endpoint().to_string();
+            let (mut sender, _) = TcpTransport.connect(&endpoint).await;
             // TCP buffers the data until the server accepts and reads it.
             sender.send(b"early").await;
-            let (_, mut receiver) = t.accept().await;
+            let (_, mut receiver) = listener.accept().await;
             assert_eq!(receiver.recv().await.unwrap(), b"early");
         });
     }
@@ -135,10 +147,10 @@ mod tests {
     #[test]
     fn all_byte_values_survive() {
         Runtime::new().block_on(async {
-            let mut t = TcpTransport::bind().await;
-            let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
-            let (_, mut receiver) = t.accept().await;
+            let mut listener = TcpTransport.bind().await;
+            let endpoint = listener.endpoint().to_string();
+            let (mut sender, _) = TcpTransport.connect(&endpoint).await;
+            let (_, mut receiver) = listener.accept().await;
             let msg: Vec<u8> = (0..=255).collect();
             sender.send(&msg).await;
             assert_eq!(receiver.recv().await.unwrap(), msg);
@@ -148,10 +160,10 @@ mod tests {
     #[test]
     fn ordering_across_many_frames() {
         Runtime::new().block_on(async {
-            let mut t = TcpTransport::bind().await;
-            let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
-            let (_, mut receiver) = t.accept().await;
+            let mut listener = TcpTransport.bind().await;
+            let endpoint = listener.endpoint().to_string();
+            let (mut sender, _) = TcpTransport.connect(&endpoint).await;
+            let (_, mut receiver) = listener.accept().await;
             futures::join!(
                 async {
                     for i in 0..1000u32 {
@@ -172,10 +184,10 @@ mod tests {
     #[test]
     fn frame_larger_than_socket_buffer() {
         Runtime::new().block_on(async {
-            let mut t = TcpTransport::bind().await;
-            let endpoint = t.endpoint().to_string();
-            let (mut sender, _) = TcpTransport::connect(&endpoint).await;
-            let (_, mut receiver) = t.accept().await;
+            let mut listener = TcpTransport.bind().await;
+            let endpoint = listener.endpoint().to_string();
+            let (mut sender, _) = TcpTransport.connect(&endpoint).await;
+            let (_, mut receiver) = listener.accept().await;
             let msg: Vec<u8> = (0..4 * 1024 * 1024u32).map(|i| i as u8).collect();
             let (_, received) = futures::join!(async { sender.send(&msg).await }, async {
                 receiver.recv().await.unwrap()
@@ -187,10 +199,10 @@ mod tests {
     #[test]
     fn rpc_call_round_trip() {
         Runtime::new().block_on(async {
-            let mut t = TcpTransport::bind().await;
-            let endpoint = t.endpoint().to_string();
-            let (mut client, _) = TcpTransport::connect(&endpoint).await;
-            let (mut server_reply, mut server_rx) = t.accept().await;
+            let mut listener = TcpTransport.bind().await;
+            let endpoint = listener.endpoint().to_string();
+            let (mut client, _) = TcpTransport.connect(&endpoint).await;
+            let (mut server_reply, mut server_rx) = listener.accept().await;
             let (response, _) = futures::join!(async { client.call(b"ping").await }, async {
                 assert_eq!(server_rx.recv().await.unwrap(), b"ping");
                 server_reply.send(b"pong").await;
@@ -202,12 +214,12 @@ mod tests {
     #[test]
     fn connections_do_not_mix_frames() {
         Runtime::new().block_on(async {
-            let mut t = TcpTransport::bind().await;
-            let endpoint = t.endpoint().to_string();
-            let (mut s1, _) = TcpTransport::connect(&endpoint).await;
-            let (mut s2, _) = TcpTransport::connect(&endpoint).await;
-            let (_, mut r1) = t.accept().await;
-            let (_, mut r2) = t.accept().await;
+            let mut listener = TcpTransport.bind().await;
+            let endpoint = listener.endpoint().to_string();
+            let (mut s1, _) = TcpTransport.connect(&endpoint).await;
+            let (mut s2, _) = TcpTransport.connect(&endpoint).await;
+            let (_, mut r1) = listener.accept().await;
+            let (_, mut r2) = listener.accept().await;
             s1.send(b"from s1").await;
             s2.send(b"from s2").await;
             // Identify each connection by its payload rather than its accept order.

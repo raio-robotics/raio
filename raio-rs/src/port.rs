@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -9,17 +8,90 @@ use std::task::{Poll, Waker};
 
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, Handles};
+use crate::app::{InputEnd, OutputEnd};
+use crate::messages::PortInfo;
 use crate::node::{EventSink, EventSource, ExecutionMode, Node, NodeId, NodeScheduler};
 use crate::runtime::{BoxFuture, Runtime, TaskId, WakeKind};
+use crate::serializer::Serializer;
+use crate::serializer::bincode::BincodeSerializer;
 use crate::time::Time;
+use crate::transport::tcp::TcpTransport;
+use crate::transport::{AnyTransport, Transport};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct PortId {
     pub node_id: NodeId,
     pub port_id: usize,
+}
+
+/// A port's position in its node and the serializers and transports it can use.
+pub(crate) struct PortSpec<T> {
+    id: usize,
+    serializers: RefCell<Vec<Rc<dyn Serializer<T>>>>,
+    transports: RefCell<Vec<Rc<dyn AnyTransport>>>,
+}
+
+impl<T: Serialize + DeserializeOwned + 'static> PortSpec<T> {
+    /// Create the spec of the port at this position, using bincode over TCP.
+    fn new(id: usize) -> Self {
+        Self {
+            id,
+            serializers: RefCell::new(vec![Rc::new(BincodeSerializer)]),
+            transports: RefCell::new(vec![Rc::new(TcpTransport)]),
+        }
+    }
+}
+
+impl<T> PortSpec<T> {
+    /// Create the spec of a channel that never connects to another node.
+    fn local() -> Self {
+        Self {
+            id: 0,
+            serializers: RefCell::new(Vec::new()),
+            transports: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Describe the port for registration, without its addresses.
+    pub(crate) fn describe(&self) -> PortInfo {
+        let serializers = self.serializers.borrow();
+        let transports = self.transports.borrow();
+        PortInfo {
+            id: self.id,
+            serializers: serializers.iter().map(|s| s.name().to_string()).collect(),
+            transports: transports.iter().map(|t| t.name().to_string()).collect(),
+            endpoints: None,
+        }
+    }
+
+    /// Return the serializer with this name; the port must have it.
+    pub(crate) fn serializer(&self, name: &str) -> Rc<dyn Serializer<T>> {
+        let serializers = self.serializers.borrow();
+        let found = serializers.iter().find(|s| s.name() == name).cloned();
+        found.unwrap_or_else(|| panic!("port {} has no serializer named {name:?}", self.id))
+    }
+
+    pub(crate) fn transports(&self) -> Vec<Rc<dyn AnyTransport>> {
+        self.transports.borrow().clone()
+    }
+
+    /// Return the transport with this name; the port must have it.
+    pub(crate) fn transport(&self, name: &str) -> Rc<dyn AnyTransport> {
+        let found = self.transports().into_iter().find(|t| t.name() == name);
+        found.unwrap_or_else(|| panic!("port {} has no transport named {name:?}", self.id))
+    }
+
+    fn set_serializer(&self, serializer: impl Serializer<T> + 'static) {
+        *self.serializers.borrow_mut() = vec![Rc::new(serializer)];
+    }
+
+    fn set_transport(&self, transport: impl Transport + 'static) {
+        *self.transports.borrow_mut() = vec![Rc::new(transport)];
+    }
 }
 
 pub(crate) type InputQueue<T> = RefCell<BTreeMap<Time, (T, bool)>>;
@@ -33,16 +105,22 @@ pub(crate) struct InputChannel<T> {
     waiters: RefCell<HashMap<TaskId, (Waker, Waker)>>,
     remote_ent: Cell<Time>,
     closed: Cell<bool>,
+    pub(crate) spec: PortSpec<T>,
 }
 
 impl<T> InputChannel<T> {
     pub fn new() -> Self {
+        Self::with_spec(PortSpec::local())
+    }
+
+    fn with_spec(spec: PortSpec<T>) -> Self {
         Self {
             queue: RefCell::new(BTreeMap::new()),
             latest: RefCell::new(None),
             waiters: RefCell::new(HashMap::new()),
             remote_ent: Cell::new(Time::ZERO),
             closed: Cell::new(false),
+            spec,
         }
     }
 
@@ -154,6 +232,16 @@ pub struct InputPort<T> {
 }
 
 impl<T> InputPort<T> {
+    /// Use this serializer in place of the port's default.
+    pub fn set_serializer(&self, serializer: impl Serializer<T> + 'static) {
+        self.channel.spec.set_serializer(serializer);
+    }
+
+    /// Use this transport in place of the port's default.
+    pub fn set_transport(&self, transport: impl Transport + 'static) {
+        self.channel.spec.set_transport(transport);
+    }
+
     /// The value delivered at the current tag, if any.
     pub fn get(&self) -> Option<Ref<'_, T>> {
         let now = self.scheduler.now();
@@ -168,6 +256,11 @@ impl<T> InputPort<T> {
         })
         .ok()
         .map(|value| (value, timestamp))
+    }
+
+    /// True once the input has closed and delivered every value.
+    pub fn closed(&self) -> bool {
+        self.channel.closed.get() && self.channel.queue.borrow().is_empty()
     }
 
     /// Wait for a value after this call's tag; return `None` when the input closes and drains.
@@ -205,27 +298,32 @@ impl<T> InputPort<T> {
     }
 }
 
-pub(crate) type OutputSender = Box<dyn Fn(Time, Time, bool)>;
+/// Sends one tag's frame, with its value if set, over one connection.
+pub(crate) type OutputSender<T> = Box<dyn Fn(Time, Time, bool, Option<&T>)>;
 
 /// Holds the current tag's output value and the callbacks that transmit its frame.
 pub struct OutputChannel<T> {
     pub(crate) cell: RefCell<Option<T>>,
-    pub(crate) senders: RefCell<Vec<OutputSender>>,
+    pub(crate) senders: RefCell<Vec<OutputSender<T>>>,
+    pub(crate) spec: PortSpec<T>,
 }
 
 impl<T> OutputChannel<T> {
-    fn new() -> Self {
+    fn new(spec: PortSpec<T>) -> Self {
         Self {
             cell: RefCell::new(None),
             senders: RefCell::new(Vec::new()),
+            spec,
         }
     }
 }
 
 impl<T> EventSink for OutputChannel<T> {
     fn send(&self, timestamp: Time, ent: Time, physical: bool) {
+        // Every connection of the output sends the same value.
+        let value = self.cell.borrow_mut().take();
         for sender in self.senders.borrow().iter() {
-            sender(timestamp, ent, physical);
+            sender(timestamp, ent, physical, value.as_ref());
         }
     }
 
@@ -242,6 +340,16 @@ pub struct OutputPort<T> {
 }
 
 impl<T> OutputPort<T> {
+    /// Use this serializer in place of the port's default.
+    pub fn set_serializer(&self, serializer: impl Serializer<T> + 'static) {
+        self.channel.spec.set_serializer(serializer);
+    }
+
+    /// Use this transport in place of the port's default.
+    pub fn set_transport(&self, transport: impl Transport + 'static) {
+        self.channel.spec.set_transport(transport);
+    }
+
     pub fn set(&self, value: T) {
         assert!(
             !self.scheduler.tag_complete(),
@@ -261,9 +369,9 @@ pub struct Builder {
     node_id: NodeId,
     pub(crate) next_port_id: usize,
     scheduler: Rc<NodeScheduler>,
-    pub(crate) ports: HashMap<PortId, Rc<dyn Any>>,
-    /// Every input port must have exactly one upstream connection.
-    pub(crate) inputs: Vec<PortId>,
+    /// Each input port needs exactly one upstream connection.
+    pub(crate) inputs: Vec<Rc<dyn InputEnd>>,
+    pub(crate) outputs: Vec<Rc<dyn OutputEnd>>,
     /// Internal tasks that forward action values into input channels.
     pub(crate) tasks: Vec<BoxFuture<()>>,
 }
@@ -274,18 +382,17 @@ impl Builder {
             node_id,
             next_port_id: 0,
             scheduler,
-            ports: HashMap::new(),
             inputs: Vec::new(),
+            outputs: Vec::new(),
             tasks: Vec::new(),
         }
     }
 
-    pub fn input<T: 'static>(&mut self) -> InputPort<T> {
+    pub fn input<T: Serialize + DeserializeOwned + 'static>(&mut self) -> InputPort<T> {
         let id = self.next_port_id();
-        let channel = Rc::new(InputChannel::new());
+        let channel = Rc::new(InputChannel::with_spec(PortSpec::new(id.port_id)));
         self.scheduler.add_source(channel.clone());
-        self.ports.insert(id, channel.clone() as Rc<dyn Any>);
-        self.inputs.push(id);
+        self.inputs.push(channel.clone());
         InputPort {
             id,
             channel,
@@ -328,11 +435,11 @@ impl Builder {
         }
     }
 
-    pub fn output<T: 'static>(&mut self) -> OutputPort<T> {
+    pub fn output<T: Serialize + DeserializeOwned + 'static>(&mut self) -> OutputPort<T> {
         let id = self.next_port_id();
-        let channel = Rc::new(OutputChannel::new());
+        let channel = Rc::new(OutputChannel::new(PortSpec::new(id.port_id)));
         self.scheduler.add_sink(channel.clone());
-        self.ports.insert(id, channel.clone() as Rc<dyn Any>);
+        self.outputs.push(channel.clone());
         OutputPort {
             id,
             channel,
@@ -353,7 +460,9 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serializer::tests::Decimal;
     use crate::time::S;
+    use crate::transport::tests::Loopback;
 
     fn channel() -> InputChannel<i64> {
         InputChannel::new()
@@ -483,27 +592,62 @@ mod tests {
     }
 
     #[test]
+    fn a_port_uses_bincode_over_tcp_until_set_otherwise() {
+        let scheduler = Rc::new(NodeScheduler::new(Rc::new(Runtime::new())));
+        let mut builder = Builder::new(0, scheduler);
+        let _first: InputPort<i64> = builder.input();
+        let out: OutputPort<i64> = builder.output();
+        let described = out.channel.spec.describe();
+        // A port is known by its position among the ports its node built.
+        assert_eq!(described.id, 1);
+        assert_eq!(described.serializers, ["bincode"]);
+        assert_eq!(described.transports, ["tcp"]);
+
+        out.set_serializer(Decimal);
+        out.set_transport(Loopback);
+        let described = out.channel.spec.describe();
+        assert_eq!(described.serializers, [Decimal.name()]);
+        assert_eq!(described.transports, [Transport::name(&Loopback)]);
+    }
+
+    #[test]
     fn output_channel_fans_out_to_every_sender() {
-        let ch = OutputChannel::<i64>::new();
+        let ch = OutputChannel::<i64>::new(PortSpec::local());
         let log = Rc::new(RefCell::new(Vec::new()));
         for edge in [1, 2] {
             let log = log.clone();
             ch.senders
                 .borrow_mut()
-                .push(Box::new(move |timestamp, ent, physical| {
-                    log.borrow_mut().push((edge, timestamp, ent, physical));
+                .push(Box::new(move |timestamp, ent, physical, value| {
+                    log.borrow_mut()
+                        .push((edge, timestamp, ent, physical, value.copied()));
                 }));
         }
 
+        *ch.cell.borrow_mut() = Some(7);
         ch.send(1 * S, 2 * S, true);
+        // Both connections carry the tag's value.
         assert_eq!(
             *log.borrow(),
-            vec![(1, 1 * S, 2 * S, true), (2, 1 * S, 2 * S, true)]
+            vec![
+                (1, 1 * S, 2 * S, true, Some(7)),
+                (2, 1 * S, 2 * S, true, Some(7))
+            ]
+        );
+
+        ch.send(2 * S, 3 * S, false);
+        // A tag without a value still sends its frame on every connection.
+        assert_eq!(
+            log.borrow()[2..],
+            [
+                (1, 2 * S, 3 * S, false, None),
+                (2, 2 * S, 3 * S, false, None)
+            ]
         );
 
         ch.close();
         ch.send(3 * S, 4 * S, false);
-        assert_eq!(log.borrow().len(), 2); // Closing the channel removes all sender callbacks.
+        assert_eq!(log.borrow().len(), 4); // Closing the channel removes all sender callbacks.
     }
 
     // These integration tests drive port futures through the scheduler.
@@ -708,6 +852,17 @@ mod tests {
         assert_eq!(*seen.borrow(), vec![1, 2]);
         assert!(done.get());
         assert_eq!(rig.scheduler.now(), 2 * S);
+    }
+
+    #[test]
+    fn an_input_is_closed_once_its_queue_has_drained() {
+        let rig = Rig::new();
+        let (port, channel) = rig.port(0);
+        channel.push(1 * S, 1);
+        channel.close();
+        assert!(!port.closed()); // The queued value is still to come.
+        rig.settle();
+        assert!(port.closed());
     }
 
     #[test]

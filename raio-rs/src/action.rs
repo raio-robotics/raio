@@ -42,6 +42,10 @@ impl<T> Action<T> {
         self.port.latest()
     }
 
+    pub fn closed(&self) -> bool {
+        self.port.closed()
+    }
+
     pub fn wait(&self) -> impl Future<Output = Option<(Ref<'_, T>, Time)>> {
         self.port.wait()
     }

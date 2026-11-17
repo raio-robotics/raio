@@ -6,6 +6,10 @@ use super::Serializer;
 pub struct BincodeSerializer;
 
 impl<T: Serialize + DeserializeOwned> Serializer<T> for BincodeSerializer {
+    fn name(&self) -> &str {
+        "bincode"
+    }
+
     fn serialize(&self, value: &T) -> Vec<u8> {
         bincode::serde::encode_to_vec(value, bincode::config::standard()).unwrap()
     }

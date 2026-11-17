@@ -13,6 +13,14 @@ use std::time::Instant;
 pub type TaskId = usize;
 pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
+/// Runs an idle thread's blocking wait, which it receives as its argument.
+pub type IdleHook = fn(&mut dyn FnMut());
+
+thread_local! {
+    /// Called for each blocking wait on this thread.
+    static IDLE_HOOK: Cell<Option<IdleHook>> = const { Cell::new(None) };
+}
+
 /// A waker's instruction for scheduling the task that it wakes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WakeKind {
@@ -101,6 +109,11 @@ impl Runtime {
         waker::new(task, kind, self.wake_sender.clone())
     }
 
+    /// Run every blocking wait on this thread inside `hook`.
+    pub fn set_idle_hook(hook: IdleHook) {
+        IDLE_HOOK.set(Some(hook));
+    }
+
     /// Take the next queued task wake without blocking.
     pub(crate) fn next_wake(&self) -> Option<(TaskId, WakeKind)> {
         match self.wake_receiver.try_recv() {
@@ -113,7 +126,12 @@ impl Runtime {
     /// Take a queued wake or wait once in the driver; return `None` if no task woke.
     pub(crate) fn wait_wake_until(&self, alarm_due: Option<Instant>) -> Option<(TaskId, WakeKind)> {
         self.next_wake().or_else(|| {
-            Driver::with(|driver| driver.wait(alarm_due)).expect("the I/O poller failed");
+            let mut wait =
+                || Driver::with(|driver| driver.wait(alarm_due)).expect("the I/O poller failed");
+            match IDLE_HOOK.get() {
+                Some(hook) => hook(&mut wait),
+                None => wait(),
+            }
             self.next_wake()
         })
     }
@@ -208,6 +226,26 @@ mod tests {
         rt.poll(rt.next_wake().unwrap().0);
         resume.borrow().as_ref().unwrap().wake_by_ref();
         assert_eq!(rt.next_wake(), Some((task, WakeKind::Resume)));
+    }
+
+    #[test]
+    fn an_idle_hook_surrounds_each_blocking_wait() {
+        thread_local! {
+            static CALLS: Cell<usize> = const { Cell::new(0) };
+        }
+        std::thread::spawn(|| {
+            Runtime::set_idle_hook(|wait| {
+                CALLS.set(CALLS.get() + 1);
+                wait();
+            });
+            let runtime = Runtime::new();
+            let due = Instant::now() + std::time::Duration::from_millis(5);
+            assert!(runtime.wait_wake_until(Some(due)).is_none());
+            assert_eq!(CALLS.get(), 1);
+            assert!(Instant::now() >= due); // The hook ran the wait itself.
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

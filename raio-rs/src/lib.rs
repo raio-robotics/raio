@@ -2,6 +2,7 @@ pub mod action;
 pub mod app;
 pub mod coordinator;
 pub mod driver;
+pub mod graph;
 pub mod messages;
 pub mod node;
 pub mod port;

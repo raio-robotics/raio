@@ -51,6 +51,21 @@ impl Node {
         self.scheduler.is_physical()
     }
 
+    /// True if the current tag's frame has been sent.
+    pub fn tag_complete(&self) -> bool {
+        self.scheduler.tag_complete()
+    }
+
+    /// Spawn another user task on this node.
+    pub fn spawn(&self, task: impl Future<Output = ()> + 'static) {
+        self.scheduler.spawn(task);
+    }
+
+    /// Stop running the node as soon as the current poll returns.
+    pub fn abort(&self) {
+        self.scheduler.aborted.set(true);
+    }
+
     pub async fn wait(&self, duration: Time) -> Time {
         assert!(duration > Time::ZERO, "wait needs a positive duration");
         let target = self.scheduler.now() + duration;
@@ -112,6 +127,8 @@ pub struct NodeScheduler {
     execution_mode: Cell<ExecutionMode>,
     /// Outputs close after all user tasks finish.
     user_tasks: RefCell<Vec<TaskId>>,
+    /// Ends the run loop without completing the current tag.
+    aborted: Cell<bool>,
 }
 
 impl NodeScheduler {
@@ -136,6 +153,7 @@ impl NodeScheduler {
             alarms,
             execution_mode: Cell::new(execution_mode),
             user_tasks: RefCell::new(Vec::new()),
+            aborted: Cell::new(false),
         }
     }
 
@@ -319,6 +337,9 @@ impl NodeScheduler {
     /// Process task wakes and advance tags until idle and done.
     fn run_until(&self, done: impl Fn() -> bool) {
         loop {
+            if self.aborted.get() {
+                return;
+            }
             if let Some((task, kind)) = self.runtime.next_wake() {
                 self.handle_wake(task, kind);
                 continue;
@@ -1107,6 +1128,51 @@ mod tests {
             *sink.sent.borrow(),
             vec![(1 * MS, Time::FOREVER, false), (at, Time::FOREVER, true)]
         );
+    }
+
+    #[test]
+    fn a_task_spawned_by_a_task_keeps_the_node_running() {
+        let (_runtime, scheduler, sink) = node_rig();
+        let node = Rc::new(Node {
+            scheduler: scheduler.clone(),
+        });
+        let seen = Rc::new(Cell::new(None));
+        let (out, parent) = (seen.clone(), node.clone());
+        scheduler.run_user(async move {
+            let child = parent.clone();
+            parent.spawn(async move { out.set(Some(child.wait(2 * MS).await)) });
+            parent.wait(1 * MS).await;
+        });
+        assert_eq!(seen.get(), Some(2 * MS));
+        // The outputs stay open until the spawned task finishes.
+        assert_eq!(
+            *sink.sent.borrow(),
+            vec![(1 * MS, 2 * MS, false), (2 * MS, Time::FOREVER, false)]
+        );
+        assert!(sink.closed.get());
+    }
+
+    #[test]
+    fn an_aborted_node_stops_without_completing_its_tag() {
+        let (_runtime, scheduler, sink) = node_rig();
+        let node = Node {
+            scheduler: scheduler.clone(),
+        };
+        let late = Rc::new(Cell::new(false));
+        let (out, other) = (late.clone(), scheduler.clone());
+        scheduler.spawn(async move {
+            Node { scheduler: other }.wait(5 * MS).await;
+            out.set(true);
+        });
+        scheduler.run_user(async move {
+            node.wait(1 * MS).await;
+            assert!(!node.tag_complete());
+            node.abort();
+        });
+        assert_eq!(scheduler.now(), 1 * MS);
+        assert!(!late.get()); // The other task never ran again.
+        assert!(sink.sent.borrow().is_empty());
+        assert!(!sink.closed.get());
     }
 
     #[test]

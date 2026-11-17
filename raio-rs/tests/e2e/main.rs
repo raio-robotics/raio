@@ -1,5 +1,15 @@
+use raio::app::{Assignment, Builder, InputPort, run_node};
+use raio::coordinator::Coordinator;
+use raio::graph::{Connection, Graph, PortRef};
+use raio::register;
+use raio::runtime::Runtime;
+use raio::serializer::bincode::BincodeSerializer;
+use raio::time::Time;
+use raio::transport::tcp::TcpTransport;
+use std::cell::RefCell;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::rc::Rc;
 
 fn run_example(name: &str) -> String {
     run_example_with_input(name, "")
@@ -139,6 +149,123 @@ fn foreign() {
     );
     // The foreign future must resume after the task's previous logical tag.
     assert!(nanos(node_time.trim()) > 1_000_000_000, "{node_time}");
+}
+
+#[test]
+fn fanout() {
+    let stdout = run_example("fanout");
+    let mut lines: Vec<_> = stdout.lines().collect();
+    lines.sort(); // The two sinks print from their own processes.
+    assert_eq!(
+        lines,
+        [
+            "far got 0 at 11ms",
+            "far got 1 at 12ms",
+            "far got 2 at 13ms",
+            "near got 0 at 1ms",
+            "near got 1 at 2ms",
+            "near got 2 at 3ms",
+        ]
+    );
+}
+
+/// Collects what the `node` example sends.
+struct Collector {
+    input: InputPort<String>,
+    received: Rc<RefCell<Vec<String>>>,
+}
+
+impl Collector {
+    async fn start(self: Rc<Self>) {
+        while let Some((value, _)) = self.input.wait().await {
+            self.received.borrow_mut().push(value.clone());
+        }
+    }
+}
+
+/// The results of the coordinator, the `node` example, and the collector.
+type Launched = (Result<(), String>, Output, std::thread::Result<Vec<String>>);
+
+/// Run the `node` example and an in-process collector, connected at the collector's `input` port.
+fn launch(input: usize) -> Launched {
+    let graph = Graph {
+        nodes: 2,
+        connections: vec![Connection {
+            from: PortRef {
+                node_id: 0,
+                port: 0,
+            },
+            to: PortRef {
+                node_id: 1,
+                port: input,
+            },
+            delay: Time::ZERO,
+            serializer: "bincode".to_string(),
+            transport: "tcp".to_string(),
+        }],
+    };
+    let (announce, announced) = std::sync::mpsc::channel();
+    let coordinator = std::thread::spawn(move || {
+        Runtime::new().block_on(async move {
+            let coordinator = Coordinator::new(TcpTransport, BincodeSerializer).await;
+            announce.send(coordinator.endpoint().to_string()).unwrap();
+            coordinator.run(graph).await
+        })
+    });
+    let coordinator_endpoint = announced.recv().unwrap();
+    let assign = |node_id| Assignment {
+        node_id,
+        coordinator_endpoint: coordinator_endpoint.clone(),
+    };
+
+    let mut program = std::env::current_exe().unwrap();
+    program.pop();
+    program.pop();
+    program.push("examples");
+    program.push("node");
+    let example = Command::new(program)
+        .arg("hello world")
+        .args(assign(0).args())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let assignment = assign(1);
+    let collector = std::thread::spawn(move || {
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let seen = received.clone();
+        let constructor = move |builder: &mut Builder| Collector {
+            input: builder.input(),
+            received: seen,
+        };
+        run_node(assignment, constructor, register![Collector::start]);
+        received.take()
+    });
+    (
+        coordinator.join().unwrap(),
+        example.wait_with_output().unwrap(),
+        collector.join(),
+    )
+}
+
+#[test]
+fn a_node_in_its_own_program_is_wired_by_port_position() {
+    let (wired, example, collected) = launch(0);
+    assert_eq!(wired, Ok(()));
+    assert!(example.status.success());
+    assert_eq!(collected.unwrap(), ["hello world"]);
+}
+
+#[test]
+fn a_graph_that_names_a_missing_port_stops_every_node() {
+    let (wired, example, collected) = launch(3);
+    let refusal = "node 1 has no input port 3; its input ports are [0]";
+    assert_eq!(wired, Err(refusal.to_string()));
+    assert!(!example.status.success());
+    assert!(String::from_utf8(example.stderr).unwrap().contains(refusal));
+    let panic = collected.unwrap_err();
+    assert!(panic.downcast_ref::<String>().unwrap().contains(refusal));
 }
 
 /// Parse a displayed time without microsteps into nanoseconds.

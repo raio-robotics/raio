@@ -1,6 +1,7 @@
 pub use crate::action::{Action, ActionHandle};
 use crate::coordinator::{Coordinator, register};
-use crate::messages::Frame;
+use crate::graph::{Connection, Graph, PortRef};
+use crate::messages::{Downstream, Frame, PortInfo, Upstream};
 pub use crate::node::{ExecutionMode, Node};
 use crate::node::{NodeId, NodeScheduler};
 pub use crate::port::{Builder, InputPort, OutputPort, PortId};
@@ -10,45 +11,40 @@ use crate::serializer::Serializer;
 use crate::serializer::bincode::BincodeSerializer;
 use crate::time::Time;
 use crate::transport::tcp::TcpTransport;
-use crate::transport::{Receiver, Sender, Transport};
-use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use futures::future::join_all;
-use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 
-type Runner = Box<dyn FnOnce(Rc<Runtime>, Vec<Box<dyn Edge>>, String)>;
+type Runner = Box<dyn FnOnce(Rc<Runtime>, Assignment)>;
 pub type Start<N> = Box<dyn FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>>>;
 
-/// A port connection whose payload type is hidden from the app.
-pub(crate) trait Edge {
-    fn from(&self) -> PortId;
-    fn to(&self) -> PortId;
-    /// Create an input listener and return its address and frame-receiving task.
-    fn listen(
-        &self,
-        port: Rc<dyn Any>,
-        scheduler: Rc<NodeScheduler>,
-    ) -> BoxFuture<(String, BoxFuture<()>)>;
-    /// Attach an output sender and return the task that connects and sends its frames.
-    fn connect_to(&self, endpoint: String, port: Rc<dyn Any>) -> BoxFuture<()>;
+/// Builds an input's frame-receiving task once its upstream is known.
+pub(crate) type Receive = Box<dyn FnOnce(Upstream) -> BoxFuture<()>>;
+
+/// An input's listening address for each of its transports.
+pub(crate) type Endpoints = HashMap<String, String>;
+
+/// An input port whose payload type is hidden from the node's wiring.
+pub(crate) trait InputEnd {
+    /// Describe the port for registration, without its addresses.
+    fn describe(&self) -> PortInfo;
+    /// Listen with each of the port's transports; return the addresses and receiving task builder.
+    fn listen(self: Rc<Self>, scheduler: Rc<NodeScheduler>) -> BoxFuture<(Endpoints, Receive)>;
 }
 
-struct TypedEdge<Tr, T, S> {
-    from: PortId,
-    to: PortId,
-    serializer: Rc<S>,
-    delay: Time,
-    types: PhantomData<fn() -> (Tr, T)>,
+/// An output port whose payload type is hidden from the node's wiring.
+pub(crate) trait OutputEnd {
+    fn describe(&self) -> PortInfo;
+    /// Attach a sender for one downstream input and return the task that sends its frames.
+    fn connect_to(self: Rc<Self>, downstream: Downstream) -> BoxFuture<()>;
 }
 
 /// Apply the edge delay, queue the frame's value, and update the input's ENT.
-fn deliver<T, S: Serializer<T>>(
-    serializer: &S,
+fn deliver<T>(
+    serializer: &dyn Serializer<T>,
     delay: Time,
     channel: &InputChannel<T>,
     scheduler: &NodeScheduler,
@@ -67,115 +63,136 @@ fn deliver<T, S: Serializer<T>>(
     channel.update_remote_ent(message.ent + delay);
 }
 
-impl<Tr: Transport + 'static, T: 'static, S: Serializer<T> + 'static> Edge for TypedEdge<Tr, T, S> {
-    fn from(&self) -> PortId {
-        self.from
+impl<T: 'static> InputEnd for InputChannel<T> {
+    fn describe(&self) -> PortInfo {
+        self.spec.describe()
     }
 
-    fn to(&self) -> PortId {
-        self.to
-    }
-
-    fn listen(
-        &self,
-        port: Rc<dyn Any>,
-        scheduler: Rc<NodeScheduler>,
-    ) -> BoxFuture<(String, BoxFuture<()>)> {
-        let channel = port.downcast::<InputChannel<T>>().unwrap();
-        let (serializer, delay) = (self.serializer.clone(), self.delay);
+    fn listen(self: Rc<Self>, scheduler: Rc<NodeScheduler>) -> BoxFuture<(Endpoints, Receive)> {
         Box::pin(async move {
-            let mut transport = Tr::bind().await;
-            let endpoint = transport.endpoint().to_string();
-            let receive: BoxFuture<()> = Box::pin(async move {
-                let (_sender, mut receiver) = transport.accept().await;
-                while let Some(frame) = receiver.recv().await {
-                    let message: Frame = BincodeSerializer.deserialize(&frame);
-                    deliver(&*serializer, delay, &channel, &scheduler, message);
-                }
-                channel.close();
+            let mut endpoints = HashMap::new();
+            let mut accepts = HashMap::new();
+            for transport in self.spec.transports() {
+                let name = transport.name().to_string();
+                let (endpoint, accept) = transport.listen().await;
+                endpoints.insert(name.clone(), endpoint);
+                accepts.insert(name, accept);
+            }
+            let receive: Receive = Box::new(move |upstream| {
+                let serializer = self.spec.serializer(&upstream.serializer);
+                // The listeners of the other transports close here.
+                let accept = accepts.remove(&upstream.transport).unwrap();
+                let input = self.clone();
+                Box::pin(async move {
+                    accept(Box::new(move |frame| {
+                        let message: Frame = BincodeSerializer.deserialize(&frame);
+                        deliver(&*serializer, upstream.delay, &input, &scheduler, message);
+                    }))
+                    .await;
+                    self.close();
+                })
             });
-            (endpoint, receive)
+            (endpoints, receive)
         })
     }
+}
 
-    fn connect_to(&self, endpoint: String, port: Rc<dyn Any>) -> BoxFuture<()> {
-        let channel = port.downcast::<OutputChannel<T>>().unwrap();
-        let serializer = self.serializer.clone();
-        let (frames, mut queued) = unbounded::<Vec<u8>>();
-        let value_channel = channel.clone();
-        channel
-            .senders
+impl<T: 'static> OutputEnd for OutputChannel<T> {
+    fn describe(&self) -> PortInfo {
+        self.spec.describe()
+    }
+
+    fn connect_to(self: Rc<Self>, downstream: Downstream) -> BoxFuture<()> {
+        let serializer = self.spec.serializer(&downstream.serializer);
+        let transport = self.spec.transport(&downstream.transport);
+        let (frames, queued) = unbounded::<Vec<u8>>();
+        self.senders
             .borrow_mut()
-            .push(Box::new(move |timestamp, ent, physical| {
-                let value = value_channel.cell.borrow_mut().take();
+            .push(Box::new(move |timestamp, ent, physical, value| {
                 let message = Frame {
                     timestamp,
                     ent,
                     physical,
-                    value: value.map(|value| serializer.serialize(&value)),
+                    value: value.map(|value| serializer.serialize(value)),
                 };
                 frames
                     .unbounded_send(BincodeSerializer.serialize(&message))
                     .unwrap();
             }));
-        Box::pin(async move {
-            let (mut sender, _receiver) = Tr::connect(&endpoint).await;
-            while let Some(frame) = queued.next().await {
-                sender.send(&frame).await;
-            }
-        })
+        transport.send(downstream.endpoint, queued)
     }
 }
 
 /// Stores the node graph and launches one process per node.
 pub struct App {
-    edges: Vec<Box<dyn Edge>>,
+    connections: Vec<Connection>,
     nodes: Vec<Runner>,
+    /// Every input port must have exactly one upstream connection.
+    inputs: Vec<(NodeId, Rc<dyn InputEnd>)>,
 }
 
 impl App {
     pub fn new() -> Self {
         Self {
-            edges: Vec::new(),
+            connections: Vec::new(),
             nodes: Vec::new(),
+            inputs: Vec::new(),
         }
     }
 
-    pub fn connect<T>(&mut self, from: &OutputPort<T>, to: &InputPort<T>)
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned + 'static,
-    {
-        self.connect_with::<TcpTransport, T, BincodeSerializer>(
-            from,
-            to,
-            BincodeSerializer,
-            Time::ZERO,
-        );
+    /// Connect two ports with the first serializer and the first transport that both offer.
+    pub fn connect<T: 'static>(&mut self, from: &OutputPort<T>, to: &InputPort<T>) {
+        let common = |kind: &str, offered: Vec<String>, accepted: Vec<String>| {
+            offered
+                .into_iter()
+                .find(|name| accepted.contains(name))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "output port {:?} and input port {:?} offer no common {kind}",
+                        from.id, to.id
+                    )
+                })
+        };
+        let (output, input) = (from.channel.spec.describe(), to.channel.spec.describe());
+        let serializer = common("serializer", output.serializers, input.serializers);
+        let transport = common("transport", output.transports, input.transports);
+        self.connect_with(from, to, &serializer, &transport, Time::ZERO);
     }
 
-    pub fn connect_with<Tr, T, S>(
+    pub fn connect_with<T: 'static>(
         &mut self,
         from: &OutputPort<T>,
         to: &InputPort<T>,
-        serializer: S,
+        serializer: &str,
+        transport: &str,
         delay: Time,
-    ) where
-        Tr: Transport + 'static,
-        T: 'static,
-        S: Serializer<T> + 'static,
-    {
+    ) {
+        let connection = Connection {
+            from: PortRef {
+                node_id: from.id.node_id,
+                port: from.id.port_id,
+            },
+            to: PortRef {
+                node_id: to.id.node_id,
+                port: to.id.port_id,
+            },
+            delay,
+            serializer: serializer.to_string(),
+            transport: transport.to_string(),
+        };
         assert!(
-            self.edges.iter().all(|edge| edge.to() != to.id),
+            self.connections
+                .iter()
+                .all(|other| other.to != connection.to),
             "input port {:?} already has an upstream; an input accepts exactly one connection",
             to.id
         );
-        self.edges.push(Box::new(TypedEdge::<Tr, T, S> {
-            from: from.id,
-            to: to.id,
-            serializer: Rc::new(serializer),
-            delay,
-            types: PhantomData,
-        }));
+        // Both ports must have the serializer and the transport.
+        from.channel.spec.serializer(serializer);
+        to.channel.spec.serializer(serializer);
+        from.channel.spec.transport(transport);
+        to.channel.spec.transport(transport);
+        self.connections.push(connection);
     }
 
     pub fn create_node<N: 'static>(
@@ -189,124 +206,217 @@ impl App {
         // Run the constructor here for wiring and again in the node's child process.
         let handle = constructor(&mut builder);
         let ports = builder.next_port_id;
-        self.nodes
-            .push(Box::new(move |runtime, edges, coordinator_endpoint| {
-                let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
-                let mut builder = Builder::new(node_id, scheduler.clone());
-                let node = Rc::new(constructor(&mut builder));
+        let inputs = std::mem::take(&mut builder.inputs);
+        self.inputs
+            .extend(inputs.into_iter().map(|input| (node_id, input)));
+        self.nodes.push(Box::new(move |runtime, assignment| {
+            let constructor = |builder: &mut Builder| {
+                let node = constructor(builder);
                 assert!(
                     builder.next_port_id == ports,
                     "node {node_id}: constructor created a different number of ports \
                  than on its first run; constructors must be deterministic"
                 );
-                let ports = std::mem::take(&mut builder.ports);
-                let inputs = std::mem::take(&mut builder.inputs);
-                for task in std::mem::take(&mut builder.tasks) {
-                    runtime.spawn_internal(task);
-                }
-                let frame_transfer = runtime.block_on(connect(
-                    scheduler.clone(),
-                    node_id,
-                    coordinator_endpoint,
-                    edges,
-                    ports,
-                    inputs,
-                ));
-                let tasks = starts
-                    .into_iter()
-                    .map(|start| start(node.clone()))
-                    .collect();
-                scheduler.run(frame_transfer, tasks);
-            }));
+                node
+            };
+            run_on(runtime, assignment, constructor, starts);
+        }));
         handle
     }
 
     pub fn run(self) {
-        let args = std::env::args().collect::<Vec<String>>();
-        match args.iter().position(|arg| arg == "--node_id") {
-            Some(index) => {
-                let node_id = args[index + 1].parse::<usize>().unwrap();
-                let coordinator_index = args
-                    .iter()
-                    .position(|arg| arg == "--coordinator_endpoint")
-                    .unwrap();
-                let coordinator_endpoint = args[coordinator_index + 1].clone();
-                let runner = self.nodes.into_iter().nth(node_id).unwrap();
-                runner(Rc::new(Runtime::new()), self.edges, coordinator_endpoint);
+        self.check_wiring();
+        match Assignment::from_args() {
+            Some(assignment) => {
+                let runner = self.nodes.into_iter().nth(assignment.node_id).unwrap();
+                runner(Rc::new(Runtime::new()), assignment);
             }
             None => {
-                let node_count = self.nodes.len();
+                let graph = Graph {
+                    nodes: self.nodes.len(),
+                    connections: self.connections,
+                };
                 let exe = std::env::current_exe().unwrap();
+                let args: Vec<String> = std::env::args().skip(1).collect();
                 Runtime::new().block_on(async move {
-                    let coordinator = Coordinator::<TcpTransport, _>::new(BincodeSerializer).await;
+                    let coordinator = Coordinator::new(TcpTransport, BincodeSerializer).await;
                     let endpoint = coordinator.endpoint().to_string();
-                    let children = (0..node_count)
+                    let children = (0..graph.nodes)
                         .map(|node_id| {
+                            let assignment = Assignment {
+                                node_id,
+                                coordinator_endpoint: endpoint.clone(),
+                            };
+                            // The program's own arguments keep their positions.
                             std::process::Command::new(&exe)
-                                .arg("--node_id")
-                                .arg(node_id.to_string())
-                                .arg("--coordinator_endpoint")
-                                .arg(&endpoint)
-                                .args(&args[1..])
+                                .args(&args)
+                                .args(assignment.args())
                                 .spawn()
                                 .unwrap()
                         })
                         .collect::<Vec<_>>();
-                    coordinator.run(node_count).await;
+                    let wired = coordinator.run(graph).await;
                     for mut child in children {
                         let status = child.wait().unwrap();
-                        assert!(status.success(), "node exited with {status} status");
+                        assert!(
+                            wired.is_err() || status.success(),
+                            "node exited with {status} status"
+                        );
+                    }
+                    if let Err(refusal) = wired {
+                        panic!("{refusal}");
                     }
                 });
             }
         }
     }
+
+    /// Assert that every input port has an upstream.
+    fn check_wiring(&self) {
+        for (node_id, input) in &self.inputs {
+            let port = PortRef {
+                node_id: *node_id,
+                port: input.describe().id,
+            };
+            assert!(
+                self.connections
+                    .iter()
+                    .any(|connection| connection.to == port),
+                "input {port} has no upstream; connect it with App::connect"
+            );
+        }
+    }
 }
 
-/// Register input listeners and return the task that transfers frames over all edges.
+/// A node's place in an app, as its launcher assigned it.
+pub struct Assignment {
+    pub node_id: NodeId,
+    pub coordinator_endpoint: String,
+}
+
+impl Assignment {
+    const NODE_ID: &str = "--node_id";
+    const COORDINATOR_ENDPOINT: &str = "--coordinator_endpoint";
+
+    /// Read the assignment that a launcher put in the program's arguments.
+    pub fn from_args() -> Option<Self> {
+        Self::parse(std::env::args())
+    }
+
+    /// Return `None` without `--node_id`; a launcher that passes it must pass both flags in full.
+    fn parse(args: impl IntoIterator<Item = String>) -> Option<Self> {
+        let args: Vec<String> = args.into_iter().collect();
+        // The launcher's flags come last, after the program's own arguments.
+        let value = |flag: &str| {
+            let index = args.iter().rposition(|arg| arg == flag)?;
+            let value = args.get(index + 1);
+            Some(
+                value
+                    .unwrap_or_else(|| panic!("{flag} needs a value"))
+                    .clone(),
+            )
+        };
+        let node_id = value(Self::NODE_ID)?;
+        let coordinator_endpoint = value(Self::COORDINATOR_ENDPOINT);
+        Some(Self {
+            node_id: node_id
+                .parse()
+                .unwrap_or_else(|_| panic!("{} is not a node id: {node_id:?}", Self::NODE_ID)),
+            coordinator_endpoint: coordinator_endpoint.unwrap_or_else(|| {
+                panic!("{} needs {}", Self::NODE_ID, Self::COORDINATOR_ENDPOINT)
+            }),
+        })
+    }
+
+    /// Return the program arguments that carry this assignment.
+    pub fn args(&self) -> [String; 4] {
+        [
+            Self::NODE_ID.to_string(),
+            self.node_id.to_string(),
+            Self::COORDINATOR_ENDPOINT.to_string(),
+            self.coordinator_endpoint.clone(),
+        ]
+    }
+}
+
+/// Run one node in this process until it finishes.
+pub fn run_node<N: 'static>(
+    assignment: Assignment,
+    constructor: impl FnOnce(&mut Builder) -> N,
+    starts: Vec<Start<N>>,
+) {
+    run_on(Rc::new(Runtime::new()), assignment, constructor, starts);
+}
+
+/// Build a node, wire it through the coordinator, and run it until it finishes.
+fn run_on<N: 'static>(
+    runtime: Rc<Runtime>,
+    assignment: Assignment,
+    constructor: impl FnOnce(&mut Builder) -> N,
+    starts: Vec<Start<N>>,
+) {
+    let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
+    let mut builder = Builder::new(assignment.node_id, scheduler.clone());
+    let node = Rc::new(constructor(&mut builder));
+    for task in std::mem::take(&mut builder.tasks) {
+        runtime.spawn_internal(task);
+    }
+    let frame_transfer = runtime.block_on(connect(
+        scheduler.clone(),
+        assignment,
+        std::mem::take(&mut builder.inputs),
+        std::mem::take(&mut builder.outputs),
+    ));
+    let tasks = starts
+        .into_iter()
+        .map(|start| start(node.clone()))
+        .collect();
+    scheduler.run(frame_transfer, tasks);
+}
+
+/// Register the node's ports and return the task that transfers frames over all connections.
 async fn connect(
     scheduler: Rc<NodeScheduler>,
-    node_id: NodeId,
-    coordinator_endpoint: String,
-    edges: Vec<Box<dyn Edge>>,
-    ports: HashMap<PortId, Rc<dyn Any>>,
-    inputs: Vec<PortId>,
+    assignment: Assignment,
+    inputs: Vec<Rc<dyn InputEnd>>,
+    outputs: Vec<Rc<dyn OutputEnd>>,
 ) -> BoxFuture<()> {
+    let mut ports = Vec::new();
+    let mut listeners = HashMap::new();
     for input in &inputs {
-        assert!(
-            edges.iter().any(|edge| edge.to() == *input),
-            "input port {input:?} has no upstream; connect it with App::connect"
-        );
+        let (endpoints, receive) = input.clone().listen(scheduler.clone()).await;
+        let port = PortInfo {
+            endpoints: Some(endpoints),
+            ..input.describe()
+        };
+        listeners.insert(port.id, receive);
+        ports.push(port);
     }
-    let port = |id: PortId| {
-        ports
-            .get(&id)
-            .unwrap_or_else(|| panic!("port {id:?} was never built by its node's constructor"))
-            .clone()
-    };
+    ports.extend(outputs.iter().map(|output| output.describe()));
 
-    let mut endpoints = HashMap::new();
-    let mut receives = Vec::new();
-    for edge in edges.iter().filter(|edge| edge.to().node_id == node_id) {
-        let (endpoint, receive) = edge.listen(port(edge.to()), scheduler.clone()).await;
-        endpoints.insert(edge.to(), endpoint);
-        receives.push(receive);
-    }
-
-    let table = register::<TcpTransport, _>(
+    let wiring = register(
+        &TcpTransport,
         &BincodeSerializer,
-        &coordinator_endpoint,
-        node_id,
-        endpoints,
+        &assignment.coordinator_endpoint,
+        assignment.node_id,
+        ports,
     )
-    .await;
+    .await
+    .unwrap_or_else(|refusal| panic!("node {}: {refusal}", assignment.node_id));
     scheduler.start();
 
-    let sends: Vec<_> = edges
-        .iter()
-        .filter(|edge| edge.from().node_id == node_id)
-        .map(|edge| edge.connect_to(table[&edge.to()].clone(), port(edge.from())))
+    let receives: Vec<_> = wiring
+        .upstream
+        .into_iter()
+        .map(|(id, upstream)| listeners.remove(&id).unwrap()(upstream))
         .collect();
+    let mut sends = Vec::new();
+    for output in &outputs {
+        let id = output.describe().id;
+        for downstream in wiring.downstream.get(&id).into_iter().flatten() {
+            sends.push(output.clone().connect_to(downstream.clone()));
+        }
+    }
     Box::pin(async move {
         futures::join!(join_all(sends), join_all(receives));
     })
@@ -328,7 +438,10 @@ macro_rules! register {
 mod tests {
     use super::*;
     use crate::node::EventSource;
+    use crate::serializer::tests::Decimal;
     use crate::time::{MS, S};
+    use crate::transport::Transport;
+    use crate::transport::tests::Loopback;
 
     /// Create a node at logical time 5s for edge-delivery tests.
     fn node_at_5s() -> (Rc<NodeScheduler>, InputChannel<i64>) {
@@ -396,20 +509,169 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "has no upstream")]
+    #[should_panic(expected = "input port 0 of node 0 has no upstream")]
     fn an_unconnected_input_is_a_wiring_bug() {
-        let runtime = Rc::new(Runtime::new());
-        let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
-        let mut builder = Builder::new(0, scheduler.clone());
-        let _input: InputPort<i64> = builder.input();
-        let inputs = std::mem::take(&mut builder.inputs);
-        let _frame_transfer = runtime.block_on(connect(
-            scheduler,
-            0,
-            "unused".into(),
-            Vec::new(),
-            HashMap::new(),
-            inputs,
-        ));
+        let mut app = App::new();
+        let _input: InputPort<i64> = app.create_node(|builder| builder.input(), Vec::new());
+        app.check_wiring();
+    }
+
+    /// Create an app with a source and a sink node, and return their ports.
+    fn pair() -> (App, OutputPort<i64>, InputPort<i64>) {
+        let mut app = App::new();
+        let out = app.create_node(|builder| builder.output(), Vec::new());
+        let input = app.create_node(|builder| builder.input(), Vec::new());
+        (app, out, input)
+    }
+
+    #[test]
+    fn a_connection_records_its_ports_and_what_they_have_in_common() {
+        let (mut app, out, input) = pair();
+        app.connect(&out, &input);
+        app.check_wiring();
+        let connection = &app.connections[0];
+        assert_eq!(connection.from.to_string(), "port 0 of node 0");
+        assert_eq!(connection.to.to_string(), "port 0 of node 1");
+        assert_eq!(connection.serializer, "bincode");
+        assert_eq!(connection.transport, "tcp");
+        assert_eq!(connection.delay, Time::ZERO);
+    }
+
+    #[test]
+    fn one_output_may_feed_several_inputs() {
+        let (mut app, out, input) = pair();
+        let other: InputPort<i64> = app.create_node(|builder| builder.input(), Vec::new());
+        app.connect(&out, &input);
+        app.connect_with(&out, &other, "bincode", "tcp", 10 * MS);
+        app.check_wiring();
+        assert_eq!(app.connections.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "already has an upstream")]
+    fn a_second_upstream_is_a_wiring_bug() {
+        let (mut app, out, input) = pair();
+        app.connect(&out, &input);
+        app.connect(&out, &input);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no serializer named \"pickle\"")]
+    fn a_serializer_no_port_has_is_a_wiring_bug() {
+        let (mut app, out, input) = pair();
+        app.connect_with(&out, &input, "pickle", "tcp", Time::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no transport named \"udp\"")]
+    fn a_transport_no_port_has_is_a_wiring_bug() {
+        let (mut app, out, input) = pair();
+        app.connect_with(&out, &input, "bincode", "udp", Time::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "offer no common transport")]
+    fn ports_without_a_common_transport_cannot_connect() {
+        let (mut app, out, input) = pair();
+        out.set_transport(Loopback);
+        app.connect(&out, &input);
+    }
+
+    #[test]
+    fn a_connection_uses_the_serializer_and_transport_its_ports_were_set_to() {
+        let port = |node_id| PortRef { node_id, port: 0 };
+        let graph = Graph {
+            nodes: 2,
+            connections: vec![Connection {
+                from: port(0),
+                to: port(1),
+                delay: Time::ZERO,
+                serializer: Decimal.name().to_string(),
+                transport: Transport::name(&Loopback).to_string(),
+            }],
+        };
+        let (announce, announced) = std::sync::mpsc::channel();
+        let coordinator = std::thread::spawn(move || {
+            Runtime::new().block_on(async move {
+                let coordinator = Coordinator::new(TcpTransport, BincodeSerializer).await;
+                announce.send(coordinator.endpoint().to_string()).unwrap();
+                coordinator.run(graph).await
+            })
+        });
+        let coordinator_endpoint = announced.recv().unwrap();
+        let assign = |node_id| Assignment {
+            node_id,
+            coordinator_endpoint: coordinator_endpoint.clone(),
+        };
+
+        let assignment = assign(0);
+        let source = std::thread::spawn(move || {
+            let constructor = |builder: &mut Builder| {
+                let out = builder.output();
+                out.set_serializer(Decimal);
+                out.set_transport(Loopback);
+                (builder.node(), out)
+            };
+            let start: Start<(Node, OutputPort<i64>)> = Box::new(|source| {
+                Box::pin(async move {
+                    source.0.wait(1 * MS).await;
+                    source.1.set(7);
+                })
+            });
+            run_node(assignment, constructor, vec![start]);
+        });
+        let assignment = assign(1);
+        let sink = std::thread::spawn(move || {
+            let received = Rc::new(std::cell::Cell::new(None));
+            let seen = received.clone();
+            let constructor = |builder: &mut Builder| {
+                let input = builder.input();
+                input.set_serializer(Decimal);
+                input.set_transport(Loopback);
+                input
+            };
+            let start: Start<InputPort<i64>> = Box::new(move |input| {
+                Box::pin(async move { seen.set(input.wait().await.map(|(value, _)| *value)) })
+            });
+            run_node(assignment, constructor, vec![start]);
+            received.get()
+        });
+        assert_eq!(coordinator.join().unwrap(), Ok(()));
+        source.join().unwrap();
+        assert_eq!(sink.join().unwrap(), Some(7));
+    }
+
+    fn program(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn an_assignment_travels_through_the_program_arguments() {
+        let assignment = Assignment {
+            node_id: 3,
+            coordinator_endpoint: "127.0.0.1:9".to_string(),
+        };
+        let flags = assignment.args();
+        assert_eq!(
+            flags,
+            ["--node_id", "3", "--coordinator_endpoint", "127.0.0.1:9"]
+        );
+        // The flags follow the program's own arguments.
+        let mut args = program(&["node", "hello world"]);
+        args.extend(flags);
+        let parsed = Assignment::parse(args).unwrap();
+        assert_eq!(parsed.node_id, 3);
+        assert_eq!(parsed.coordinator_endpoint, "127.0.0.1:9");
+    }
+
+    #[test]
+    fn a_program_started_by_hand_has_no_assignment() {
+        assert!(Assignment::parse(program(&["node", "hello world"])).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "--node_id is not a node id: \"first\"")]
+    fn a_malformed_assignment_is_a_launch_bug() {
+        Assignment::parse(program(&["node", "--node_id", "first"]));
     }
 }

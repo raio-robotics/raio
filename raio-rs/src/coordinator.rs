@@ -1,143 +1,128 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use crate::messages::{EndpointTable, RegisterNode};
-use crate::port::PortId;
+use crate::graph::Graph;
+use crate::messages::{PortInfo, RegisterNode, Reply};
 use crate::serializer::Serializer;
-use crate::transport::{Receiver, Sender, Transport};
+use crate::transport::{Listener, Receiver, Sender, Transport};
 
 pub struct Coordinator<T: Transport, S> {
-    transport: T,
+    listener: T::Listener,
     serializer: S,
 }
 
-impl<T: Transport, S: Serializer<RegisterNode> + Serializer<EndpointTable>> Coordinator<T, S> {
-    pub async fn new(serializer: S) -> Self {
+impl<T: Transport, S: Serializer<RegisterNode> + Serializer<Reply>> Coordinator<T, S> {
+    pub async fn new(transport: T, serializer: S) -> Self {
         Self {
-            transport: T::bind().await,
+            listener: transport.bind().await,
             serializer,
         }
     }
 
     pub fn endpoint(&self) -> &str {
-        self.transport.endpoint()
+        self.listener.endpoint()
     }
 
-    /// Wait for all nodes to register, then send the complete endpoint table to each node.
-    pub async fn run(mut self, nodes: usize) {
+    /// Wait for all nodes to register, then send each its wiring or the reason for refusing it.
+    pub async fn run(mut self, graph: Graph) -> Result<(), String> {
         let mut repliers = Vec::new();
-        let mut registered = Vec::new();
-        let mut table = EndpointTable::new();
-        for _ in 0..nodes {
-            let (replier, mut receiver) = self.transport.accept().await;
-            let RegisterNode { node_id, endpoints } =
+        let mut registered = BTreeMap::new();
+        for _ in 0..graph.nodes {
+            let (replier, mut receiver) = self.listener.accept().await;
+            let RegisterNode { node_id, ports } =
                 self.serializer.deserialize(&receiver.recv().await.unwrap());
             assert!(
-                !registered.contains(&node_id),
+                registered.insert(node_id, ports).is_none(),
                 "node {node_id} registered twice"
             );
-            registered.push(node_id);
-            for (port, endpoint) in endpoints {
-                let previous = table.insert(port, endpoint);
-                assert!(previous.is_none(), "port {port:?} registered twice");
-            }
-            repliers.push(replier);
+            repliers.push((node_id, replier));
         }
-        let reply = self.serializer.serialize(&table);
-        for replier in &mut repliers {
-            replier.send(&reply).await;
+        let mut wirings = graph.wire(&registered);
+        for (node_id, mut replier) in repliers {
+            let reply: Reply = match &mut wirings {
+                Ok(wirings) => Ok(wirings.remove(&node_id).unwrap()),
+                Err(error) => Err(error.clone()),
+            };
+            replier.send(&self.serializer.serialize(&reply)).await;
         }
+        wirings.map(|_| ())
     }
 }
 
-/// Register this node's input addresses and wait for every node's addresses.
-pub async fn register<T: Transport, S: Serializer<RegisterNode> + Serializer<EndpointTable>>(
+/// Describe this node's ports to the coordinator and wait for their wiring.
+pub async fn register<T: Transport, S: Serializer<RegisterNode> + Serializer<Reply>>(
+    transport: &T,
     serializer: &S,
     coordinator_endpoint: &str,
     node_id: usize,
-    endpoints: HashMap<PortId, String>,
-) -> EndpointTable {
-    let (mut sender, _) = T::connect(coordinator_endpoint).await;
-    let request = serializer.serialize(&RegisterNode { node_id, endpoints });
+    ports: Vec<PortInfo>,
+) -> Reply {
+    let (mut sender, _) = transport.connect(coordinator_endpoint).await;
+    let request = serializer.serialize(&RegisterNode { node_id, ports });
     serializer.deserialize(&sender.call(&request).await)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
+    use crate::graph::tests::{fan_out, graph, nodes};
+    use crate::messages::Wiring;
     use crate::runtime::Runtime;
     use crate::serializer::bincode::BincodeSerializer;
     use crate::transport::tcp::TcpTransport;
-
-    fn port(node_id: usize, port_id: usize) -> PortId {
-        PortId { node_id, port_id }
-    }
 
     /// Use a separate thread and runtime to simulate each node process.
     fn spawn_node(
         coordinator: String,
         node_id: usize,
-        registered: Arc<AtomicUsize>,
-    ) -> std::thread::JoinHandle<()> {
+        ports: Vec<PortInfo>,
+    ) -> std::thread::JoinHandle<Reply> {
         std::thread::spawn(move || {
             Runtime::new().block_on(async move {
-                let transport = TcpTransport::bind().await;
-                let endpoints =
-                    HashMap::from([(port(node_id, 0), transport.endpoint().to_string())]);
-                registered.fetch_add(1, Ordering::SeqCst);
-                let table = register::<TcpTransport, _>(
-                    &BincodeSerializer,
-                    &coordinator,
-                    node_id,
-                    endpoints,
-                )
-                .await;
-                // Registration completes only after all nodes have registered.
-                assert_eq!(registered.load(Ordering::SeqCst), 3);
-                assert_eq!(table.len(), 3);
-                assert_eq!(table[&port(node_id, 0)], transport.endpoint());
+                let (transport, serializer) = (TcpTransport, BincodeSerializer);
+                register(&transport, &serializer, &coordinator, node_id, ports).await
             })
         })
     }
 
     #[test]
-    fn barrier_and_table() {
+    fn every_node_gets_its_wiring_once_all_have_registered() {
         Runtime::new().block_on(async {
-            let coordinator = Coordinator::<TcpTransport, _>::new(BincodeSerializer).await;
+            let coordinator = Coordinator::new(TcpTransport, BincodeSerializer).await;
             let endpoint = coordinator.endpoint().to_string();
-            let registered = Arc::new(AtomicUsize::new(0));
-            let children: Vec<_> = (0..3)
-                .map(|node_id| spawn_node(endpoint.clone(), node_id, registered.clone()))
+            let children: Vec<_> = nodes()
+                .into_iter()
+                .map(|(node_id, ports)| spawn_node(endpoint.clone(), node_id, ports))
                 .collect();
-            coordinator.run(3).await;
-            for child in children {
-                child.join().unwrap();
-            }
+            assert_eq!(coordinator.run(graph(fan_out())).await, Ok(()));
+            let wirings: Vec<Wiring> = children
+                .into_iter()
+                .map(|child| child.join().unwrap().unwrap())
+                .collect();
+            assert_eq!(wirings[0].downstream[&0].len(), 2);
+            assert_eq!(wirings[2].upstream[&3].serializer, "bincode");
         });
     }
 
     #[test]
-    fn a_node_may_register_many_ports_or_none() {
+    fn a_graph_that_does_not_fit_is_reported_to_every_node() {
         Runtime::new().block_on(async {
-            let coordinator = Coordinator::<TcpTransport, _>::new(BincodeSerializer).await;
+            let coordinator = Coordinator::new(TcpTransport, BincodeSerializer).await;
             let endpoint = coordinator.endpoint().to_string();
-            let child = std::thread::spawn(move || {
-                Runtime::new().block_on(async move {
-                    let endpoints = HashMap::from([
-                        (port(7, 0), "a".to_string()),
-                        (port(7, 1), "b".to_string()),
-                    ]);
-                    let table =
-                        register::<TcpTransport, _>(&BincodeSerializer, &endpoint, 7, endpoints)
-                            .await;
-                    assert_eq!(table.len(), 2);
-                    assert_eq!(table[&port(7, 1)], "b");
-                })
-            });
-            coordinator.run(1).await;
-            child.join().unwrap();
+            let children: Vec<_> = nodes()
+                .into_iter()
+                .map(|(node_id, ports)| spawn_node(endpoint.clone(), node_id, ports))
+                .collect();
+            let refused = coordinator.run(graph(fan_out()[..1].to_vec())).await;
+            assert_eq!(
+                refused,
+                Err("input port 3 of node 2 has no upstream".to_string())
+            );
+            for child in children {
+                assert_eq!(
+                    child.join().unwrap(),
+                    refused.clone().map(|_| Wiring::default())
+                );
+            }
         });
     }
 
@@ -145,51 +130,16 @@ mod tests {
     #[should_panic(expected = "node 0 registered twice")]
     fn duplicate_node_id_is_a_launch_bug() {
         Runtime::new().block_on(async {
-            let coordinator = Coordinator::<TcpTransport, _>::new(BincodeSerializer).await;
+            let coordinator = Coordinator::new(TcpTransport, BincodeSerializer).await;
             let endpoint = coordinator.endpoint().to_string();
             for _ in 0..2 {
-                let endpoint = endpoint.clone();
-                std::thread::spawn(move || {
-                    Runtime::new().block_on(async move {
-                        register::<TcpTransport, _>(
-                            &BincodeSerializer,
-                            &endpoint,
-                            0,
-                            HashMap::new(),
-                        )
-                        .await;
-                    })
-                });
+                spawn_node(endpoint.clone(), 0, Vec::new());
             }
-            coordinator.run(2).await; // Both child nodes register the same node ID.
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "registered twice")]
-    fn duplicate_port_is_a_wiring_bug() {
-        Runtime::new().block_on(async {
-            let coordinator = Coordinator::<TcpTransport, _>::new(BincodeSerializer).await;
-            let endpoint = coordinator.endpoint().to_string();
-            for node_id in 0..2 {
-                let endpoint = endpoint.clone();
-                std::thread::spawn(move || {
-                    Runtime::new().block_on(async move {
-                        let transport = TcpTransport::bind().await;
-                        // Both nodes register the same port ID.
-                        let endpoints =
-                            HashMap::from([(port(0, 0), transport.endpoint().to_string())]);
-                        register::<TcpTransport, _>(
-                            &BincodeSerializer,
-                            &endpoint,
-                            node_id,
-                            endpoints,
-                        )
-                        .await;
-                    })
-                });
-            }
-            coordinator.run(2).await;
+            let two_nodes = Graph {
+                nodes: 2,
+                connections: Vec::new(),
+            };
+            let _ = coordinator.run(two_nodes).await; // Both child nodes register the same node ID.
         });
     }
 }
