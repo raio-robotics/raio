@@ -2,7 +2,7 @@ use futures::join;
 use raio::runtime::Runtime;
 
 fn main() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
 
     runtime.block_on(async {
         println!("Hello, world! 1");
