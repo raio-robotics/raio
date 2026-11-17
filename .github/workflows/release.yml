@@ -36,6 +36,7 @@ jobs:
           BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
         run: |
           gh workflow run ci.yml --ref "$BRANCH"
+          gh workflow run pr-title.yml --ref "$BRANCH"
           gh workflow run wheels.yml --ref "$BRANCH"
 
   ci:
