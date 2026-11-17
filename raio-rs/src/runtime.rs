@@ -27,6 +27,7 @@ pub struct Runtime {
     tasks: RefCell<HashMap<usize, Pin<Box<dyn Future<Output = ()>>>>>,
     next_task_id: Cell<TaskId>,
     logical_time: Cell<Time>,
+    wakers: RefCell<Vec<Waker>>,
 }
 
 impl Runtime {
@@ -38,6 +39,7 @@ impl Runtime {
             tasks: RefCell::new(HashMap::new()),
             next_task_id: Cell::new(0),
             logical_time: Cell::new(Time::ZERO),
+            wakers: RefCell::new(Vec::new()),
         }
     }
 
@@ -49,6 +51,16 @@ impl Runtime {
 
     pub fn now(&self) -> Time {
         self.logical_time.get()
+    }
+
+    pub fn register_waker(&self, waker: Waker) {
+        self.wakers.borrow_mut().push(waker.clone());
+    }
+
+    pub fn wake_wakers(&self) {
+        for waker in self.wakers.borrow_mut().drain(..) {
+            waker.wake();
+        }
     }
 
     pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> TaskId {
