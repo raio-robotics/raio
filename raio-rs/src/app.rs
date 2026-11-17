@@ -1,7 +1,9 @@
+use crate::node::{NodeContext, NodeId};
 pub use crate::port::{Builder, InputPort, OutputPort, PortId};
 use crate::runtime::Runtime;
+use std::rc::Rc;
 
-type Runner = Box<dyn FnOnce(&Runtime)>;
+type Runner = Box<dyn FnOnce(Rc<Runtime>)>;
 
 pub struct App {
     edges: Vec<(PortId, PortId)>,
@@ -28,14 +30,16 @@ impl App {
     where
         N: 'static,
         F: FnOnce(N) -> Fut + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
     {
-        let node_id = self.nodes.len();
-        let mut builder = Builder::new(node_id);
+        let node_id: NodeId = self.nodes.len() as NodeId;
+        let node_context = Rc::new(NodeContext::new(Rc::new(Runtime::new())));
+        let mut builder = Builder::new(node_id, node_context);
         let handle = constructor(&mut builder);
         let ports = builder.port_count();
         self.nodes.push(Box::new(move |runtime| {
-            let mut builder = Builder::new(node_id);
+            let node_context = Rc::new(NodeContext::new(runtime.clone()));
+            let mut builder = Builder::new(node_id, node_context);
             let node = constructor(&mut builder);
             assert!(
                 builder.port_count() == ports,
@@ -53,7 +57,7 @@ impl App {
             Some(index) => {
                 let node_id = args[index + 1].parse::<usize>().unwrap();
                 let runner = self.nodes.into_iter().nth(node_id).unwrap();
-                runner(&Runtime::new());
+                runner(Rc::new(Runtime::new()));
             }
             None => {
                 let exe = std::env::current_exe().unwrap();
