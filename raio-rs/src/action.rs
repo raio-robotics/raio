@@ -50,6 +50,7 @@ impl<T> Action<T> {
         self.port.wait()
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn pin(&self) -> Pin<Box<impl Future<Output = Option<(Ref<'_, T>, Time)>>>> {
         self.port.pin()
     }

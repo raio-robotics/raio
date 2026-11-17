@@ -8,9 +8,8 @@ mod setting;
 use std::rc::Rc;
 
 pub use crate::action::{Action, ActionHandle};
-use crate::coordinator::{Coordinator, SERIALIZER, TRANSPORT};
+use crate::coordinator;
 pub use crate::node::{ExecutionMode, Node};
-use crate::runtime::Runtime;
 use crate::serializer::Serializer;
 use crate::time::Time;
 use crate::transport::{AnyTransport, Transport};
@@ -21,6 +20,7 @@ use run::Runner;
 pub use run::{Assignment, CreatedNode, Start, create_node, run_node, run_node_as};
 
 /// Stores the node graph and launches one process per node.
+#[derive(Default)]
 pub struct App {
     connections: Vec<Connection>,
     nodes: Vec<Runner>,
@@ -28,10 +28,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        Self {
-            connections: Vec::new(),
-            nodes: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Connect an output to an input; the returned options replace the defaults.
@@ -79,35 +76,35 @@ impl App {
 fn launch(graph: Graph) {
     let exe = std::env::current_exe().unwrap();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    Runtime::new().block_on(async move {
-        let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
-        let endpoint = coordinator.endpoint().to_string();
-        let children: Vec<_> = (0..graph.nodes)
-            .map(|node_id| {
-                let assignment = Assignment {
-                    node_id,
-                    coordinator_endpoint: endpoint.clone(),
-                };
-                // The program's own arguments keep their positions.
-                std::process::Command::new(&exe)
-                    .args(&args)
-                    .args(assignment.args())
-                    .spawn()
-                    .unwrap()
-            })
-            .collect();
-        let wired = coordinator.run(graph).await;
-        for mut child in children {
-            let status = child.wait().unwrap();
-            assert!(
-                wired.is_err() || status.success(),
-                "node exited with {status} status"
-            );
-        }
-        if let Err(refusal) = wired {
-            panic!("{refusal}");
-        }
-    });
+    let nodes = graph.nodes;
+    let (endpoint, coordinator) = coordinator::spawn(graph);
+    let children: Vec<_> = (0..nodes)
+        .map(|node_id| {
+            let assignment = Assignment {
+                node_id,
+                coordinator_endpoint: endpoint.clone(),
+            };
+            // The program's own arguments keep their positions.
+            std::process::Command::new(&exe)
+                .args(&args)
+                .args(assignment.args())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let wired = coordinator
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    for mut child in children {
+        let status = child.wait().unwrap();
+        assert!(
+            wired.is_err() || status.success(),
+            "node exited with {status} status"
+        );
+    }
+    if let Err(refusal) = wired {
+        panic!("{refusal}");
+    }
 }
 
 /// Sets the options of the connection that `App::connect` just made.

@@ -167,7 +167,7 @@ macro_rules! tasks {
 mod tests {
     use super::*;
     use crate::app::{Connection, Graph, InputPort, Node, OutputPort, PortId};
-    use crate::coordinator::{Coordinator, SERIALIZER, TRANSPORT};
+    use crate::coordinator::spawn;
     use crate::serializer::tests::Decimal;
     use crate::time::{MS, Time};
     use crate::transport::tests::Loopback;
@@ -186,15 +186,7 @@ mod tests {
                 delay: Time::ZERO,
             }],
         };
-        let (announce, announced) = std::sync::mpsc::channel();
-        let coordinator = std::thread::spawn(move || {
-            Runtime::new().block_on(async move {
-                let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
-                announce.send(coordinator.endpoint().to_string()).unwrap();
-                coordinator.run(graph).await
-            })
-        });
-        let coordinator_endpoint = announced.recv().unwrap();
+        let (coordinator_endpoint, coordinator) = spawn(graph);
         let assign = |node_id| Assignment {
             node_id,
             coordinator_endpoint: coordinator_endpoint.clone(),

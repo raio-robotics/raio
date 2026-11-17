@@ -57,6 +57,12 @@ pub struct Runtime {
     next_task_id: Cell<TaskId>,
 }
 
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Runtime {
     pub fn new() -> Self {
         let (sender, wake_receiver) = channel();
@@ -198,7 +204,7 @@ mod tests {
 
     #[test]
     fn wake_reschedules_a_suspended_task() {
-        Runtime::new().block_on(async { YieldOnce(false).await });
+        Runtime::new().block_on(YieldOnce(false));
     }
 
     #[test]

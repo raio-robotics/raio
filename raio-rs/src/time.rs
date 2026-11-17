@@ -188,6 +188,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::erasing_op)] // NEVER times zero is NEVER, which clippy takes for a mistake.
     fn sentinels_absorb() {
         assert_eq!(Time::NEVER + S, Time::NEVER);
         assert_eq!(S + Time::FOREVER, Time::FOREVER);

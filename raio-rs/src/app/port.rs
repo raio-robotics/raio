@@ -222,6 +222,7 @@ impl<T> InputPort<T> {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn pin(&self) -> Pin<Box<impl Future<Output = Option<(Ref<'_, T>, Time)>>>> {
         Box::pin(self.wait())
     }

@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::thread::JoinHandle;
 
 use crate::app::Graph;
 use crate::messages::{RegisterNode, Reply};
+use crate::runtime::Runtime;
 use crate::serializer::Serializer;
 use crate::serializer::bincode::BincodeSerializer;
 use crate::transport::tcp::TcpTransport;
@@ -68,12 +70,24 @@ pub async fn register<T: Transport, S: Serializer<RegisterNode> + Serializer<Rep
     serializer.deserialize(&sender.call(&request).await)
 }
 
+/// Run a coordinator for the graph on its own thread; return its endpoint and the thread.
+pub fn spawn(graph: Graph) -> (String, JoinHandle<Result<(), String>>) {
+    let (announce, announced) = std::sync::mpsc::channel();
+    let coordinator = std::thread::spawn(move || {
+        Runtime::new().block_on(async move {
+            let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
+            announce.send(coordinator.endpoint().to_string()).unwrap();
+            coordinator.run(graph).await
+        })
+    });
+    (announced.recv().unwrap(), coordinator)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::graph::tests::{fan_out, graph, registrations};
     use crate::messages::Wiring;
-    use crate::runtime::Runtime;
 
     /// Use a separate thread and runtime to simulate each node process.
     fn spawn_node(

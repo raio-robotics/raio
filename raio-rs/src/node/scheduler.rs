@@ -228,12 +228,6 @@ impl NodeScheduler {
             _ => false,
         }
     }
-
-    /// Complete this tag, then advance if event ordering and wall-clock pacing allow it.
-    pub fn try_advance(&self) -> bool {
-        self.complete_tag();
-        self.advance_if_due(self.next_safe_tag())
-    }
 }
 
 impl NodeScheduler {
@@ -317,6 +311,12 @@ impl NodeScheduler {
 
 #[cfg(test)]
 impl NodeScheduler {
+    /// Complete this tag, then advance if event ordering and wall-clock pacing allow it.
+    pub(crate) fn try_advance(&self) -> bool {
+        self.complete_tag();
+        self.advance_if_due(self.next_safe_tag())
+    }
+
     /// Run one user task with no frame-transfer work.
     pub(crate) fn run_user(&self, task: impl Future<Output = ()> + 'static) {
         self.run(async {}, vec![Box::pin(task)]);
@@ -427,8 +427,11 @@ mod tests {
         assert_eq!(scheduler.now(), 3 * S); // The closed source cannot block the 3s event.
     }
 
+    /// The tag, ENT promise and physical flag of each frame a sink received.
+    type Frames = Vec<(Time, Time, bool)>;
+
     struct RecordingSink {
-        sent: RefCell<Vec<(Time, Time, bool)>>,
+        sent: RefCell<Frames>,
         closed: Cell<bool>,
     }
     impl RecordingSink {
@@ -605,7 +608,7 @@ mod tests {
     }
 
     /// Record whether a wait preserves the physical flag of its triggering input.
-    fn wait_after(physical: bool) -> ((bool, bool), Vec<(Time, Time, bool)>) {
+    fn wait_after(physical: bool) -> ((bool, bool), Frames) {
         let (_runtime, scheduler, sink) = node_rig();
         let (port, channel) = InputPort::local(&scheduler);
         let node = Node {
