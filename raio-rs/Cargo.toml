@@ -13,5 +13,6 @@ categories = ["asynchronous", "concurrency", "simulation"]
 name = "raio"
 
 [dependencies]
+async-net = "2.0.0"
 futures = "0.3.34"
-mio = { version = "1.2.2", features = ["net", "os-poll"] }
+

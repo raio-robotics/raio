@@ -1,4 +1,3 @@
-use crate::driver::Driver;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,7 +22,6 @@ impl Wake for Task {
 pub struct Runtime {
     ready_queue: std::sync::mpsc::Receiver<Arc<Task>>,
     task_sender: std::sync::mpsc::Sender<Arc<Task>>,
-    driver: Driver,
 }
 
 impl Runtime {
@@ -32,7 +30,6 @@ impl Runtime {
         Self {
             ready_queue,
             task_sender: task_sender.clone(),
-            driver: Driver::new(),
         }
     }
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
@@ -44,28 +41,18 @@ impl Runtime {
         };
         self.task_sender.send(Arc::new(task)).unwrap();
     }
-    pub fn block_on(&mut self, future: impl Future<Output = ()> + Send + 'static) {
+    pub fn block_on(&self, future: impl Future<Output = ()> + Send + 'static) {
         let root_task = Arc::new(Task {
             future: Mutex::new(Box::pin(future)),
             task_sender: self.task_sender.clone(),
         });
         self.task_sender.send(root_task.clone()).unwrap();
-        loop {
-            match self.ready_queue.try_recv() {
-                Ok(task) => {
-                    let waker = Waker::from(task.clone());
-                    let mut context = Context::from_waker(&waker);
-                    let ret = task.future.lock().unwrap().as_mut().poll(&mut context);
-                    if ret.is_ready() && Arc::ptr_eq(&task, &root_task) {
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    self.driver.turn();
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    panic!("Runtime: ready_queue disconnected");
-                }
+        while let Ok(task) = self.ready_queue.recv() {
+            let waker = Waker::from(task.clone());
+            let mut context = Context::from_waker(&waker);
+            let ret = task.future.lock().unwrap().as_mut().poll(&mut context);
+            if ret.is_ready() && Arc::ptr_eq(&task, &root_task) {
+                break;
             }
         }
     }
