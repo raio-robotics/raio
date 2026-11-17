@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
-NAMES = ["action", "hello", "join", "reaction", "same_tag", "select_first", "serializer"]
-NAMES += ["shutdown", "sync"]
+NAMES = ["action", "hello", "join", "mixed", "reaction", "same_tag", "select_first"]
+NAMES += ["serializer", "shutdown", "sync"]
 
 
 def run_example(name):
@@ -18,7 +18,7 @@ def run_example(name):
 
 
 @pytest.fixture(scope="module")
-def finished():
+def finished(rust_nodes):
     """Run every example at once, since each paces itself on the wall clock."""
     with concurrent.futures.ThreadPoolExecutor(len(NAMES)) as pool:
         return dict(zip(NAMES, pool.map(run_example, NAMES)))
@@ -44,6 +44,13 @@ def test_join(finished):
         [f"consume {i} at {i + 1}s" for i in range(4)]
         + [f"produce {i} at {700 * (i + 1)}ms" for i in range(4)]
     )
+
+
+def test_mixed(finished):
+    assert printed(finished, "mixed") == [
+        "{'name': 'celsius', 'value': 205.0} at 1ms",
+        "{'name': 'celsius', 'value': 210.0} at 2ms",
+    ]
 
 
 def test_reaction(finished):

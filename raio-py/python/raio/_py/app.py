@@ -10,11 +10,12 @@ import threading
 from typing import Protocol, TypeVar
 
 import cloudpickle
+import msgpack
 
 from .._rs import core
 from .._rs.core import Time
 from . import states
-from .node import Node
+from .node import Node, RustNode
 from .ports import InputPort, OutputPort
 from .utils import end_processes, flush_output
 
@@ -29,6 +30,18 @@ class Serializer(Protocol[T]):
     def serialize(self, value: T) -> bytes: ...
 
     def deserialize(self, data: bytes) -> T: ...
+
+
+class MessagePack:
+    """Serializes the values that Python nodes and Rust nodes both have, as MessagePack."""
+
+    name = "msgpack"  # the name under which a Rust node has its MessagePack serializer
+
+    def serialize(self, value) -> bytes:
+        return msgpack.packb(value)
+
+    def deserialize(self, data: bytes):
+        return msgpack.unpackb(data)
 
 
 def connect(source, target, *, delay: Time = Time.ZERO, serializer: Serializer | None = None):
@@ -65,22 +78,30 @@ def run(*nodes: Node, fast_forward: bool = False) -> None:
             raise ValueError(f"{source!r} feeds {target!r}, but only one of their nodes is run")
         source_node, target_node = positions[id(source._node)], positions[id(target._node)]
         connections.append((source_node, source._index, target_node, target._index, delay.nanos))
+        rust = [isinstance(port._node, RustNode) for port in (source, target)]
+        if serializer is not None and all(rust):
+            raise ValueError(f"{source!r} feeds {target!r}: Rust nodes choose their own serializer")
+        if serializer is None and any(rust) and not all(rust):
+            serializer = MessagePack()  # A Python node and a Rust node share no other serializer.
         if serializer is not None:
-            # Both ends of the connection know the serializer by the name of its class.
+            # Both ends know the serializer by its name: the one it has, or that of its class.
             name = f"{type(serializer).__module__}.{type(serializer).__qualname__}"
+            name = getattr(serializer, "name", name)
+            # A Rust node sets its ports itself, so only a Python node takes what is listed here.
             serializers[source_node].append((source._index, name, serializer))
             serializers[target_node].append((target._index, name, serializer))
     # Pickling comes first, so that a node that cannot be sent fails before anything starts.
     # Each node's process imports from the same places as this one, so the path goes with it.
     code = {}
     for index, node in enumerate(nodes):
-        code[index] = pickle.dumps((sys.path, cloudpickle.dumps((node, serializers[index]))))
+        if not isinstance(node, RustNode):  # A Rust node is a program of its own and has no code.
+            code[index] = pickle.dumps((sys.path, cloudpickle.dumps((node, serializers[index]))))
     coordinator = core.coordinator(len(nodes), connections, code)
     _launch(nodes, coordinator, fast_forward)
 
 
 def _launch(nodes, coordinator, fast_forward):
-    """Start one process per node, which asks the coordinator for its code, and wait for all."""
+    """Start one process per node, which joins the app through the coordinator; wait for all."""
     flush_output()
     command = [sys.executable, "-m", "raio._py.process"]
     command += ["--coordinator_endpoint", coordinator.endpoint]
@@ -94,8 +115,11 @@ def _launch(nodes, coordinator, fast_forward):
 
     failed = None
     try:
-        for index in range(len(nodes)):
-            child = subprocess.Popen([*command, "--node_id", str(index)])
+        for index, node in enumerate(nodes):
+            if isinstance(node, RustNode):
+                child = node.start(index, coordinator.endpoint)
+            else:
+                child = subprocess.Popen([*command, "--node_id", str(index)])
             children.append(child)
             threading.Thread(target=wait, args=(index, child), daemon=True).start()
         for _ in children:

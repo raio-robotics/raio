@@ -59,6 +59,21 @@ class Node(metaclass=_NodeMeta):
         """
 
 
+class RustNode(Node):
+    """A node written in Rust: its ports, and how to start the program that runs it.
+
+    The class declares the node's ports in the order in which the Rust node builds them.
+    """
+
+    def start(self, node_id: int, coordinator_endpoint: str):
+        """Start the program that runs this node of the app and return its `subprocess.Popen`.
+
+        A program that calls raio-rs's `run_node` takes the two values as the arguments
+        `--node_id` and `--coordinator_endpoint`, after its own.
+        """
+        raise NotImplementedError(f"{type(self).__name__} needs a start method")
+
+
 def _kinds(node):
     """Name the kind of each port of a node, in order, for raio-rs."""
     return [port._kind for port in node._ports]

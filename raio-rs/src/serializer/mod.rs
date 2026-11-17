@@ -1,4 +1,5 @@
 pub mod bincode;
+pub mod msgpack;
 
 use std::rc::Rc;
 
