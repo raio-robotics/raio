@@ -10,16 +10,22 @@ pub trait Transport {
 
     fn endpoint(&self) -> &str;
 
-    /// Accept one inbound connection.
-    fn accept(&mut self) -> impl Future<Output = Self::Receiver> + Send;
+    /// Accept one inbound connection
+    fn accept(&mut self) -> impl Future<Output = (Self::Sender, Self::Receiver)> + Send;
 
     /// Connect to a remote endpoint
-    fn connect(&self, endpoint: &str) -> impl Future<Output = Self::Sender> + Send;
+    fn connect(
+        &self,
+        endpoint: &str,
+    ) -> impl Future<Output = (Self::Sender, Self::Receiver)> + Send;
 }
 
 pub trait Sender {
     /// Send a message to the remote endpoint.
     fn send(&mut self, msg: &[u8]) -> impl Future<Output = ()> + Send;
+
+    /// Call a remote endpoint.
+    fn call(&mut self, request: &[u8]) -> impl Future<Output = Vec<u8>> + Send;
 }
 
 pub trait Receiver {

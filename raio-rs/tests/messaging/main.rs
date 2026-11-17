@@ -8,8 +8,8 @@ fn typed_value_over_the_wire() {
     Runtime::new().block_on(async {
         let mut transport = TcpTransport::new().await;
         let endpoint = transport.endpoint().to_string();
-        let mut sender = transport.connect(&endpoint).await;
-        let mut receiver = transport.accept().await;
+        let (mut sender, _) = transport.connect(&endpoint).await;
+        let (_, mut receiver) = transport.accept().await;
 
         let serializer = SerdeSerializer;
         let value: (i64, String, Vec<f32>) = (-7, "hello, port".to_string(), vec![1.5, -0.25]);
@@ -26,8 +26,8 @@ fn mixed_types_share_one_connection_in_order() {
     Runtime::new().block_on(async {
         let mut transport = TcpTransport::new().await;
         let endpoint = transport.endpoint().to_string();
-        let mut sender = transport.connect(&endpoint).await;
-        let mut receiver = transport.accept().await;
+        let (mut sender, _) = transport.connect(&endpoint).await;
+        let (_, mut receiver) = transport.accept().await;
 
         let serializer = SerdeSerializer;
         sender.send(&serializer.serialize(&42u64)).await;
@@ -50,8 +50,8 @@ fn close_after_last_message_yields_none() {
     Runtime::new().block_on(async {
         let mut transport = TcpTransport::new().await;
         let endpoint = transport.endpoint().to_string();
-        let mut sender = transport.connect(&endpoint).await;
-        let mut receiver = transport.accept().await;
+        let (mut sender, _) = transport.connect(&endpoint).await;
+        let (_, mut receiver) = transport.accept().await;
 
         let serializer = SerdeSerializer;
         sender
@@ -70,8 +70,8 @@ fn large_typed_payload_with_concurrent_ends() {
     Runtime::new().block_on(async {
         let mut transport = TcpTransport::new().await;
         let endpoint = transport.endpoint().to_string();
-        let mut sender = transport.connect(&endpoint).await;
-        let mut receiver = transport.accept().await;
+        let (mut sender, _) = transport.connect(&endpoint).await;
+        let (_, mut receiver) = transport.accept().await;
 
         let serializer = SerdeSerializer;
         let value: Vec<u32> = (0..1_000_000).collect();
