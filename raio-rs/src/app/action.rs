@@ -7,6 +7,7 @@ use futures::channel::mpsc::UnboundedSender;
 
 use super::port::InputChannel;
 use super::reaction::Trigger;
+use crate::coordinator::PortId;
 use crate::node::NodeScheduler;
 use crate::time::Time;
 
@@ -20,6 +21,7 @@ use crate::time::Time;
 /// app.connect(&out, &action);
 /// ```
 pub struct Action<T> {
+    pub(crate) id: PortId,
     pub(crate) channel: Rc<InputChannel<T>>,
     pub(crate) scheduler: Rc<NodeScheduler>,
     pub(crate) handles: RefCell<Handles<T>>,

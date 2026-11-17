@@ -220,6 +220,7 @@ pub(crate) mod tests {
             from: end(from),
             to: end(to),
             delay,
+            physical: false,
         }
     }
 

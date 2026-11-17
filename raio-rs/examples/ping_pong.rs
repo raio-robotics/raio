@@ -1,8 +1,9 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::tasks;
 use raio::time::MS;
 use std::rc::Rc;
 
+#[derive(Ports)]
 struct Ping {
     node: Node,
     input: InputPort<i64>,
@@ -33,6 +34,7 @@ impl Ping {
     }
 }
 
+#[derive(Ports)]
 struct Pong {
     input: InputPort<i64>,
     out: OutputPort<i64>,

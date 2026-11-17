@@ -1,8 +1,9 @@
-use raio::app::{Builder, Node, OutputPort, create_node, run_node};
+use raio::app::{Builder, Node, OutputPort, Ports, create_node, run_node};
 use raio::tasks;
 use raio::time::MS;
 use std::rc::Rc;
 
+#[derive(Ports)]
 struct Producer {
     node: Node,
     out: OutputPort<String>,

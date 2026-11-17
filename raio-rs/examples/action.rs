@@ -1,4 +1,4 @@
-use raio::app::{Action, App, Builder, InputPort, Node, OutputPort};
+use raio::app::{Action, App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::tasks;
 use std::io::{self, IsTerminal, Read};
 use std::process::Command;
@@ -17,6 +17,7 @@ fn stty(settings: &[&str]) {
     }
 }
 
+#[derive(Ports)]
 struct KeyboardInput {
     keys: Action<char>,
     out: OutputPort<char>,
@@ -51,6 +52,7 @@ impl KeyboardInput {
     }
 }
 
+#[derive(Ports)]
 struct Echo {
     node: Node,
     input: InputPort<char>,

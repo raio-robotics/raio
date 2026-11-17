@@ -1,8 +1,9 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::tasks;
 use raio::time::{MS, S, Time};
 use std::rc::Rc;
 
+#[derive(Ports)]
 struct Ticker {
     node: Node,
     out: OutputPort<i64>,
@@ -24,6 +25,7 @@ impl Ticker {
     }
 }
 
+#[derive(Ports)]
 struct Worker {
     node: Node,
     input: InputPort<i64>,

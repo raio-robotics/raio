@@ -1,6 +1,6 @@
 mod tests;
 
-use raio::app::{Assignment, Builder, InputPort, create_node, run_node_as};
+use raio::app::{Assignment, Builder, InputPort, Ports, create_node, run_node_as};
 use raio::coordinator::{Connection, Failure, Graph, PortId, spawn};
 use raio::tasks;
 use raio::time::Time;
@@ -202,6 +202,18 @@ fn ping_pong() {
 }
 
 #[test]
+fn physical() {
+    let stdout = run_example("physical");
+    // The loop has no delay, and every reply has a timestamp from the receiver's clock.
+    assert_eq!(
+        stdout,
+        "ping got 1 (physical: true)\n\
+         ping got 2 (physical: true)\n\
+         ping got 3 (physical: true)\n"
+    );
+}
+
+#[test]
 fn serializer() {
     let stdout = run_example("serializer");
     assert_eq!(stdout, "sink received 42\n");
@@ -307,6 +319,7 @@ fn diagram() {
 }
 
 /// Collects what the `node` example sends.
+#[derive(Ports)]
 struct Collector {
     input: InputPort<String>,
     received: Rc<RefCell<Vec<String>>>,
@@ -345,6 +358,7 @@ fn launch(input: usize) -> Launched {
             from,
             to,
             delay: Time::ZERO,
+            physical: false,
         }],
     };
     let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());

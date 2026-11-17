@@ -10,21 +10,20 @@ use futures::future::join_all;
 use super::port::{InputChannel, OutputChannel};
 use super::setting::PortSetting;
 use crate::coordinator::Link;
-use crate::messages::{Downstream, Frame, InputInfo, OutputInfo, RegisterNode, Reply};
+use crate::messages::{Downstream, Frame, InputInfo, OutputInfo, RegisterNode, Reply, Upstream};
 use crate::node::NodeScheduler;
 use crate::runtime::BoxFuture;
 use crate::serializer::Serializer;
 use crate::serializer::bincode::BincodeSerializer;
 use crate::time::Time;
 
+/// Returns the task that receives an input's frames, once the input knows what feeds it.
+pub(crate) type Receive = Box<dyn FnOnce(Upstream) -> BoxFuture<()>>;
+
 /// An input port whose payload type is hidden from the node's wiring.
 pub(crate) trait AnyInput {
-    /// Listen with the port's transport; return its description and the task that receives frames.
-    fn listen(
-        self: Rc<Self>,
-        scheduler: Rc<NodeScheduler>,
-    ) -> BoxFuture<(InputInfo, BoxFuture<()>)>;
-    fn update_remote_ent(&self, promise: Time);
+    /// Listen with the port's transport; return its description and what receives its frames.
+    fn listen(self: Rc<Self>, scheduler: Rc<NodeScheduler>) -> BoxFuture<(InputInfo, Receive)>;
 }
 
 /// An output port whose payload type is hidden from the node's wiring.
@@ -51,16 +50,21 @@ fn make_frame<T>(
     }
 }
 
-/// Queue the frame's value and update the input's ENT.
+/// Queue the frame's value and update the input's ENT. A physical connection keeps neither of
+/// the frame's times.
 fn deliver<T>(
     serializer: &dyn Serializer<T>,
     channel: &InputChannel<T>,
     scheduler: &NodeScheduler,
+    upstream: Upstream,
     message: Frame,
 ) {
     if let Some(bytes) = message.value {
         let value = serializer.deserialize(&bytes);
-        if message.physical {
+        if upstream.physical {
+            // The value gets its timestamp from this node's clock, as an action's does.
+            channel.push_physical(scheduler.mint_physical_timestamp(), value);
+        } else if message.physical {
             // Move late physical events to a timestamp after the node's current timestamp.
             let timestamp = message.timestamp.max(scheduler.now().next_microstep());
             channel.push_physical(timestamp, value);
@@ -68,15 +72,14 @@ fn deliver<T>(
             channel.push(message.timestamp, value);
         }
     }
-    channel.update_remote_ent(message.ent);
+    if !upstream.physical {
+        channel.update_remote_ent(message.ent);
+    }
 }
 
 /// An input port is its channel, which takes the frames, and its setting.
 impl<T: 'static> AnyInput for (Rc<InputChannel<T>>, Rc<PortSetting<T>>) {
-    fn listen(
-        self: Rc<Self>,
-        scheduler: Rc<NodeScheduler>,
-    ) -> BoxFuture<(InputInfo, BoxFuture<()>)> {
+    fn listen(self: Rc<Self>, scheduler: Rc<NodeScheduler>) -> BoxFuture<(InputInfo, Receive)> {
         Box::pin(async move {
             let (channel, setting) = (self.0.clone(), &self.1);
             let (serializer_name, serializer) = setting.serializers.first();
@@ -88,21 +91,21 @@ impl<T: 'static> AnyInput for (Rc<InputChannel<T>>, Rc<PortSetting<T>>) {
                 transport: transport_name,
                 endpoint,
             };
-            let receive: BoxFuture<()> = Box::pin(async move {
-                let input = channel.clone();
-                accept(Box::new(move |bytes| {
-                    let message: Frame = BincodeSerializer.deserialize(&bytes);
-                    deliver(&*serializer, &input, &scheduler, message);
-                }))
-                .await;
-                channel.close();
+            let receive: Receive = Box::new(move |upstream| {
+                // The input can go this far before its sender's first frame.
+                channel.update_remote_ent(upstream.ent);
+                Box::pin(async move {
+                    let input = channel.clone();
+                    accept(Box::new(move |bytes| {
+                        let message: Frame = BincodeSerializer.deserialize(&bytes);
+                        deliver(&*serializer, &input, &scheduler, upstream, message);
+                    }))
+                    .await;
+                    channel.close();
+                })
             });
             (info, receive)
         })
-    }
-
-    fn update_remote_ent(&self, promise: Time) {
-        self.0.update_remote_ent(promise);
     }
 }
 
@@ -140,13 +143,11 @@ pub(crate) async fn connect_node(
         inputs: Vec::new(),
         outputs: Vec::new(),
     };
-    let mut receivers = HashMap::new();
     let mut receives = Vec::new();
     for input in inputs {
-        let (info, receive) = input.clone().listen(scheduler.clone()).await;
-        receivers.insert(info.id, input);
+        let (info, receive) = input.listen(scheduler.clone()).await;
+        receives.push((info.id, receive));
         registration.inputs.push(info);
-        receives.push(receive);
     }
     let mut senders = HashMap::new();
     for output in outputs {
@@ -160,10 +161,11 @@ pub(crate) async fn connect_node(
         Reply::Refused(refusal) => panic!("node {}: {refusal}", link.node_id),
         Reply::Cancelled => return None,
     };
-    // An input can go this far before its sender's first frame, which is what starts a loop.
-    for (id, ent) in &wiring.inputs {
-        receivers[id].update_remote_ent(*ent);
-    }
+    // Every input has a connection, and learns of it before the node runs.
+    let receives = receives.into_iter();
+    let receives: Vec<_> = receives
+        .map(|(id, receive)| receive(wiring.inputs[&id]))
+        .collect();
     scheduler.start_clock();
     // The link stays open while the node runs; the node does not wait for it.
     scheduler
@@ -211,7 +213,11 @@ mod tests {
             physical,
             Some(&7),
         );
-        deliver(&BincodeSerializer, channel, scheduler, message);
+        let upstream = Upstream {
+            ent: Time::ZERO,
+            physical: false,
+        };
+        deliver(&BincodeSerializer, channel, scheduler, upstream, message);
     }
 
     #[test]
@@ -240,6 +246,33 @@ mod tests {
         let (scheduler, channel) = node_at_5s();
         receive(&scheduler, &channel, 7 * S, 20 * S, true);
         assert_eq!(channel.next_event_timestamp(), Some(7 * S + 10 * MS));
+    }
+
+    #[test]
+    fn a_physical_connection_stamps_a_value_with_the_receivers_clock() {
+        let (scheduler, channel) = node_at_5s();
+        let upstream = Upstream {
+            ent: Time::FOREVER,
+            physical: true,
+        };
+        channel.update_remote_ent(upstream.ent);
+        // The sender is at 7s and promises nothing before 8s.
+        let message = make_frame(
+            &BincodeSerializer,
+            Time::ZERO,
+            7 * S,
+            8 * S,
+            false,
+            Some(&7),
+        );
+        deliver(&BincodeSerializer, &channel, &scheduler, upstream, message);
+        // This node is ahead of the wall clock, so its clock gives the timestamp after its own.
+        assert_eq!(
+            channel.next_event_timestamp(),
+            Some((5 * S).next_microstep())
+        );
+        assert_eq!(channel.ent(), Time::FOREVER); // The input still holds nothing back.
+        assert!(channel.wake_wakers((5 * S).next_microstep())); // The value is physical.
     }
 
     #[test]

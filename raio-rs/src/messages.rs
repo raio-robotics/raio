@@ -50,13 +50,21 @@ pub struct Downstream {
     pub delay: Time,
 }
 
+/// The connection that feeds an input.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct Upstream {
+    /// The ENT that the input starts with, before its sender has promised anything.
+    pub ent: Time,
+    /// The values of a physical connection get their timestamps from the receiver's clock.
+    pub physical: bool,
+}
+
 /// What the graph gives the ports of one node, keyed by port id.
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 pub struct Wiring {
     /// The connections that each output feeds.
     pub outputs: HashMap<usize, Vec<Downstream>>,
-    /// The ENT that each input starts with, before its sender has promised anything.
-    pub inputs: HashMap<usize, Time>,
+    pub inputs: HashMap<usize, Upstream>,
 }
 
 /// The coordinator's reply to a node that has registered.

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
-NAMES = ["action", "hello", "join", "mixed", "ping_pong", "reaction", "same_timestamp"]
-NAMES += ["select_first", "serializer", "shutdown", "sync"]
+NAMES = ["action", "hello", "join", "mixed", "physical", "ping_pong", "reaction"]
+NAMES += ["same_timestamp", "select_first", "serializer", "shutdown", "sync"]
 
 
 def run_example(name):
@@ -51,6 +51,11 @@ def test_mixed(finished):
         "{'name': 'celsius', 'value': 205.0} at 1ms",
         "{'name': 'celsius', 'value': 210.0} at 2ms",
     ]
+
+
+def test_physical(finished):
+    # The loop has no delay, and every reply has a timestamp from the receiver's clock.
+    assert printed(finished, "physical") == [f"ping got {i} (physical: True)" for i in (1, 2, 3)]
 
 
 def test_ping_pong(finished):

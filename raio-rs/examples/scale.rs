@@ -1,4 +1,4 @@
-use raio::app::{Builder, InputPort, OutputPort, create_node, run_node};
+use raio::app::{Builder, InputPort, OutputPort, Ports, create_node, run_node};
 use raio::serializer::msgpack::MessagePackSerializer;
 use raio::tasks;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ struct Reading {
     value: f64,
 }
 
+#[derive(Ports)]
 struct Scale {
     input: InputPort<Reading>,
     out: OutputPort<Reading>,

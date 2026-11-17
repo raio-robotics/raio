@@ -21,7 +21,8 @@ from .utils import end_processes, flush_output
 
 T = TypeVar("T")
 
-_connections = []  # (source, target, delay, serializer) of every connection made in this process
+# (source, target, delay, serializer, physical) of every connection made in this process
+_connections = []
 
 
 def connect(
@@ -30,15 +31,20 @@ def connect(
     *,
     delay: Time = Time.ZERO,
     serializer: Serializer[T] | None = None,
+    physical: bool = False,
 ) -> None:
-    """Send every value of an output port to an input port, shifted by a logical delay."""
+    """Send every value of an output port to an input port, shifted by a logical delay.
+
+    A physical connection gives each value a timestamp from the receiver's clock when it
+    arrives, and the receiver never waits for the sender. It takes no delay.
+    """
     if not isinstance(source, OutputPort) or source._node is None:
         raise ValueError(f"connect needs an output port of a node instance, got {source!r}")
     if not isinstance(target, InputPort) or target._node is None:
         raise ValueError(f"connect needs an input port of a node instance, got {target!r}")
     if not isinstance(delay, Time) or delay < Time.ZERO or delay.microstep:
         raise ValueError("a connection delay is a Time of zero or more nanoseconds")
-    _connections.append((source, target, delay, serializer))
+    _connections.append((source, target, delay, serializer, physical))
 
 
 def run(*nodes: Node, fast_forward: bool = False) -> None:
@@ -87,14 +93,16 @@ def _wire(positions):
     """
     connections = []
     serializers = [[] for _ in positions]  # (port, name, serializer) for each node's ports
-    for source, target, delay, serializer in _connections:
+    for source, target, delay, serializer, physical in _connections:
         ends = (id(source._node) in positions, id(target._node) in positions)
         if ends == (False, False):
             continue  # A connection of another app.
         if ends != (True, True):
             raise ValueError(f"{source!r} feeds {target!r}, but only one of their nodes is run")
         source_node, target_node = positions[id(source._node)], positions[id(target._node)]
-        connections.append((source_node, source._index, target_node, target._index, delay.nanos))
+        connections.append(
+            (source_node, source._index, target_node, target._index, delay.nanos, physical)
+        )
         rust = [isinstance(port._node, RustNode) for port in (source, target)]
         if serializer is not None and all(rust):
             raise ValueError(f"{source!r} feeds {target!r}: Rust nodes choose their own serializer")

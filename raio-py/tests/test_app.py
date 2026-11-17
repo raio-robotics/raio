@@ -132,6 +132,15 @@ def test_an_input_without_a_connection_is_refused(capfd):
     capfd.readouterr()
 
 
+def test_a_physical_connection_takes_no_delay(capfd):
+    ticker, printer = Ticker(1 * MS, 1), Printer()
+    raio.connect(ticker.out, printer.inp, delay=1 * MS, physical=True)
+    refusal = "input port 0 of node 1 has a physical connection with a delay; it takes none"
+    with pytest.raises(ValueError, match=refusal):
+        raio.run(ticker, printer)
+    capfd.readouterr()
+
+
 def test_a_connection_needs_both_of_its_nodes():
     ticker, printer = Ticker(1 * MS, 1), Printer()
     raio.connect(ticker.out, printer.inp)

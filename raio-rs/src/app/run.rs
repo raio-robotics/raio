@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use super::builder::Builder;
+use super::builder::{Builder, Ports};
 use super::connection::connect_node;
 use crate::coordinator::Link;
 use crate::diagram::DiagramNode;
@@ -139,14 +139,21 @@ impl<N: 'static> CreatedNode<N> {
         node_id: NodeId,
         constructor: impl FnOnce(&mut Builder) -> N,
         tasks: Vec<Start<N>>,
-    ) -> Self {
+    ) -> Self
+    where
+        N: Ports,
+    {
         let runtime = Rc::new(Runtime::new());
         let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
         let mut builder = Builder::new(node_id, scheduler.clone());
         let node = Rc::new(constructor(&mut builder));
+        let mut ports = builder.ports.clone();
+        for (position, name) in node.names() {
+            ports[position].0 = name.to_string();
+        }
         let diagram = DiagramNode {
             name: short(std::any::type_name::<N>()),
-            ports: builder.ports.clone(),
+            ports,
             tasks: tasks
                 .iter()
                 .map(|task| task_name(task.name).to_string())
@@ -189,7 +196,7 @@ impl<N: 'static> CreatedNode<N> {
 }
 
 /// Build the node that this program runs; set its ports before `run_node`.
-pub fn create_node<N: 'static>(
+pub fn create_node<N: Ports + 'static>(
     constructor: impl FnOnce(&mut Builder) -> N,
     tasks: Vec<Start<N>>,
 ) -> CreatedNode<N> {
@@ -249,6 +256,10 @@ mod tests {
     use crate::transport::tests::Loopback;
     use crate::transport::{Listener, Receiver, Sender, Transport};
 
+    /// The nodes of these tests have no fields to name their ports after.
+    impl<A, B> Ports for (A, B) {}
+    impl Ports for Node {}
+
     /// Start a coordinator for a source, node 0, that feeds a sink, node 1; return what assigns
     /// each node its place, and the coordinator's thread.
     fn pair() -> (
@@ -265,6 +276,7 @@ mod tests {
                 from: port(0),
                 to: port(1),
                 delay: Time::ZERO,
+                physical: false,
             }],
         };
         let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());

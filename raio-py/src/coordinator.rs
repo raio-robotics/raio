@@ -58,17 +58,18 @@ impl Coordinator {
     }
 }
 
-/// A connection as Python gives it: source node and port, target node and port, and the
-/// delay in nanoseconds.
-pub(crate) type PyConnection = (usize, usize, usize, usize, i64);
+/// A connection as Python gives it: source node and port, target node and port, the delay in
+/// nanoseconds, and whether it is physical.
+pub(crate) type PyConnection = (usize, usize, usize, usize, i64, bool);
 
 pub(crate) fn connection(connection: PyConnection) -> Connection {
-    let (from_node, from_port, to_node, to_port, delay) = connection;
+    let (from_node, from_port, to_node, to_port, delay, physical) = connection;
     let port = |node_id, port_id| PortId { node_id, port_id };
     Connection {
         from: port(from_node, from_port),
         to: port(to_node, to_port),
         delay: Time::new(delay),
+        physical,
     }
 }
 

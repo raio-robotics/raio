@@ -1,0 +1,14 @@
+[package]
+name = "raio-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The derive macros of raio, a deterministic realtime async runtime"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1"
+syn = "2"

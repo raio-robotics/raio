@@ -1,9 +1,10 @@
-use raio::app::{App, Builder, Node};
+use raio::app::{App, Builder, Node, Ports};
 use raio::tasks;
 use raio::time::MS;
 use std::rc::Rc;
 use std::time::Duration;
 
+#[derive(Ports)]
 struct Ticker {
     node: Node,
 }
@@ -22,6 +23,7 @@ impl Ticker {
     }
 }
 
+#[derive(Ports)]
 struct Stuck {
     node: Node,
 }

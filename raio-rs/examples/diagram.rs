@@ -1,8 +1,10 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::time::MS;
-use raio::{ports, reaction, tasks};
+use raio::{reaction, tasks};
 use std::rc::Rc;
 
+// A diagram shows each port by the name of the field that holds it.
+#[derive(Ports)]
 struct Sensor {
     node: Node,
     reading: OutputPort<i64>,
@@ -10,11 +12,10 @@ struct Sensor {
 
 impl Sensor {
     fn new(builder: &mut Builder) -> Self {
-        // A diagram shows each port by the name of its field.
-        ports!(Self {
+        Self {
             node: builder.node(),
             reading: builder.output(),
-        })
+        }
     }
 
     async fn sample(self: Rc<Self>) {
@@ -25,6 +26,7 @@ impl Sensor {
     }
 }
 
+#[derive(Ports)]
 struct Controller {
     reading: InputPort<i64>,
     command: OutputPort<i64>,
@@ -32,10 +34,10 @@ struct Controller {
 
 impl Controller {
     fn new(builder: &mut Builder) -> Self {
-        ports!(Self {
+        Self {
             reading: builder.input(),
             command: builder.output(),
-        })
+        }
     }
 
     async fn control(self: Rc<Self>) {
@@ -45,15 +47,16 @@ impl Controller {
     }
 }
 
+#[derive(Ports)]
 struct Motor {
     command: InputPort<i64>,
 }
 
 impl Motor {
     fn new(builder: &mut Builder) -> Self {
-        ports!(Self {
+        Self {
             command: builder.input(),
-        })
+        }
     }
 
     async fn drive(self: Rc<Self>) {
@@ -63,6 +66,7 @@ impl Motor {
     }
 }
 
+#[derive(Ports)]
 struct Logger {
     reading: InputPort<i64>,
     command: InputPort<i64>,
@@ -70,10 +74,10 @@ struct Logger {
 
 impl Logger {
     fn new(builder: &mut Builder) -> Self {
-        ports!(Self {
+        Self {
             reading: builder.input(),
             command: builder.input(),
-        })
+        }
     }
 
     async fn log(self: Rc<Self>) {

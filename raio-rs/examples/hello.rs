@@ -1,8 +1,9 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::tasks;
 use raio::time::MS;
 use std::rc::Rc;
 
+#[derive(Ports)]
 struct Producer {
     node: Node,
     out: OutputPort<String>,
@@ -22,6 +23,7 @@ impl Producer {
     }
 }
 
+#[derive(Ports)]
 struct Sink {
     input: InputPort<String>,
 }

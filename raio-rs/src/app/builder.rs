@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -15,17 +15,6 @@ use crate::node::{ExecutionMode, Node, NodeId, NodeScheduler};
 use crate::runtime::BoxFuture;
 use crate::serializer::Payload;
 use crate::time::Time;
-
-thread_local! {
-    /// The name that a port gets if it is added now: that of the field that `ports!` is at.
-    static NAME: Cell<Option<&'static str>> = const { Cell::new(None) };
-}
-
-/// Name the ports that are added on this thread from now on; `ports!` calls this.
-#[doc(hidden)]
-pub fn name_ports(name: Option<&'static str>) {
-    NAME.set(name);
-}
 
 /// Creates a node's ports, actions, and clock handles using one shared scheduler.
 pub struct Builder {
@@ -69,7 +58,7 @@ impl Builder {
     /// Add an action, which the threads of this program feed.
     pub fn action<T: Send + 'static>(&mut self) -> Action<T> {
         // An action takes a position among the node's ports, as it does where Python declares it.
-        self.next_port_id(PortKind::Action);
+        let id = self.next_port_id(PortKind::Action);
         let channel = Rc::new(InputChannel::new());
         // Action values are physical, so they do not limit ENT.
         channel.update_remote_ent(Time::FOREVER);
@@ -83,6 +72,7 @@ impl Builder {
             action_channel.close(); // Dropping the last producer handle closes the action.
         }));
         Action {
+            id,
             channel,
             scheduler: self.scheduler.clone(),
             handles: RefCell::new(Handles::Unused(Arc::new(sender))),
@@ -114,9 +104,8 @@ impl Builder {
 
     fn next_port_id(&mut self, kind: PortKind) -> PortId {
         let port_id = self.ports.len();
-        // A port that was given no name is known by its position.
-        let name = NAME.get().map_or(port_id.to_string(), str::to_string);
-        self.ports.push((name, kind));
+        // A port is known by its position until a field of its node gives it a name.
+        self.ports.push((port_id.to_string(), kind));
         PortId {
             node_id: self.node_id,
             port_id,
@@ -124,18 +113,55 @@ impl Builder {
     }
 }
 
-/// Build a node and name each of its ports after the field that holds it. A diagram shows
-/// these names.
-#[macro_export]
-macro_rules! ports {
-    ($node:ident { $($field:ident: $value:expr),+ $(,)? }) => {{
-        let node = $node {
-            $($field: {
-                $crate::app::name_ports(Some(stringify!($field)));
-                $value
-            }),+
-        };
-        $crate::app::name_ports(None);
-        node
-    }};
+/// Names the ports of a node after the fields that hold them, for a diagram. A node derives
+/// it: `#[derive(Ports)]`. A port that no field holds is shown by its position.
+pub trait Ports {
+    /// The position of each port that a field holds, and the name of that field.
+    fn names(&self) -> Vec<(usize, &'static str)> {
+        Vec::new()
+    }
+}
+
+/// A port that is a node by itself has no field to take a name from.
+impl<T> Ports for InputPort<T> {}
+impl<T> Ports for OutputPort<T> {}
+impl<T> Ports for Action<T> {}
+
+/// A field of a node, which `#[derive(Ports)]` asks for the position of the port it holds.
+#[doc(hidden)]
+pub struct Field<'a, T>(pub &'a T);
+
+/// What a field that holds a port answers with.
+#[doc(hidden)]
+pub trait PortField {
+    fn position(&self) -> Option<usize>;
+}
+
+/// What every other field answers with; it is one reference further away, so a port finds
+/// `PortField` first.
+#[doc(hidden)]
+pub trait OtherField {
+    fn position(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl<T> OtherField for &Field<'_, T> {}
+
+impl<T> PortField for Field<'_, InputPort<T>> {
+    fn position(&self) -> Option<usize> {
+        Some(self.0.setting.id.port_id)
+    }
+}
+
+impl<T> PortField for Field<'_, OutputPort<T>> {
+    fn position(&self) -> Option<usize> {
+        Some(self.0.channel.setting.id.port_id)
+    }
+}
+
+impl<T> PortField for Field<'_, Action<T>> {
+    fn position(&self) -> Option<usize> {
+        Some(self.0.id.port_id)
+    }
 }

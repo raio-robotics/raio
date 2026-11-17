@@ -379,6 +379,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raio-macros"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "raio-py"
 version = "0.1.0"
 dependencies = [
@@ -396,6 +404,7 @@ dependencies = [
  "futures",
  "libc",
  "polling",
+ "raio-macros",
  "rmp-serde",
  "serde",
  "serde_bytes",

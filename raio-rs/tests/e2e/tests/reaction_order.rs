@@ -1,4 +1,6 @@
-use raio::app::{Assignment, Builder, InputPort, Node, OutputPort, create_node, run_node_as};
+use raio::app::{
+    Assignment, Builder, InputPort, Node, OutputPort, Ports, create_node, run_node_as,
+};
 use raio::coordinator::{Connection, Graph, PortId, spawn};
 use raio::reaction;
 use raio::tasks;
@@ -7,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+#[derive(Ports)]
 struct Ticker {
     node: Node,
     out: OutputPort<i64>,
@@ -21,6 +24,7 @@ impl Ticker {
     }
 }
 
+#[derive(Ports)]
 struct Order {
     node: Node,
     a: InputPort<i64>,
@@ -63,6 +67,7 @@ fn reactions_keep_their_order_when_only_some_ports_have_a_value() {
             port_id: input,
         },
         delay: Time::ZERO,
+        physical: false,
     };
     let graph = Graph {
         nodes: 3,

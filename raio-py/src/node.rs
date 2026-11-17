@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use raio::app::{Node, OutputPort};
+use raio::app::{Node, OutputPort, Ports};
 use raio::time::Time;
 
 use crate::awaitable::Awaitable;
@@ -19,6 +19,9 @@ pub(crate) struct RunningNode {
     pub(crate) ports: Vec<Port>,
     pub(crate) failure: RefCell<Option<PyErr>>,
 }
+
+/// Python names the ports itself, after the attributes that declare them.
+impl Ports for RunningNode {}
 
 thread_local! {
     /// Set when the node starts, so that the functions Python calls can find it.

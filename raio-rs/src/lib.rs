@@ -8,11 +8,12 @@
 //! its timestamp from the wall clock and is marked physical.
 //!
 //! ```no_run
-//! use raio::app::{App, Builder, InputPort, Node, OutputPort};
+//! use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 //! use raio::tasks;
 //! use raio::time::MS;
 //! use std::rc::Rc;
 //!
+//! #[derive(Ports)]
 //! struct Producer {
 //!     node: Node,
 //!     out: OutputPort<String>,
@@ -32,6 +33,7 @@
 //!     }
 //! }
 //!
+//! #[derive(Ports)]
 //! struct Sink {
 //!     input: InputPort<String>,
 //! }
@@ -75,6 +77,9 @@
 //! - `serde_bytes`: encodes the value of a frame as one block of bytes, not byte by byte, which
 //!   is much faster for large values. The Python binding has it on. A node built with it and a
 //!   node built without it can connect.
+
+// The code that `#[derive(Ports)]` writes names this crate, in this crate too.
+extern crate self as raio;
 
 pub mod app;
 pub mod coordinator;

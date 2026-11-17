@@ -1,4 +1,4 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::serializer::Serializer;
 use raio::tasks;
 use raio::time::MS;
@@ -17,6 +17,7 @@ impl Serializer<i64> for Text {
     }
 }
 
+#[derive(Ports)]
 struct Producer {
     node: Node,
     out: OutputPort<i64>,
@@ -36,6 +37,7 @@ impl Producer {
     }
 }
 
+#[derive(Ports)]
 struct Sink {
     input: InputPort<i64>,
 }

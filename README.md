@@ -16,11 +16,12 @@ A producer sends one value and a sink prints it.
 Rust (`raio-rs/examples/hello.rs`, run with `cargo run --example hello`):
 
 ```rust
-use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::tasks;
 use raio::time::MS;
 use std::rc::Rc;
 
+#[derive(Ports)]
 struct Producer {
     node: Node,
     out: OutputPort<String>,
@@ -40,6 +41,7 @@ impl Producer {
     }
 }
 
+#[derive(Ports)]
 struct Sink {
     input: InputPort<String>,
 }
@@ -122,7 +124,7 @@ How a node runs:
 - Before a sender's first promise, a receiver has the one that the coordinator works out from
   the graph: nothing arrives until the delay of the connection has passed. This is what lets a
   loop of connections start. The loop needs a delay, and one of its nodes has to act before
-  that delay has passed.
+  that delay has passed. A loop with a physical connection needs neither.
 - A node handles a timestamp no earlier than the wall clock reaches it. In fast-forward mode it
   does not wait for the wall clock, which suits tests and replays.
 
@@ -147,6 +149,7 @@ node that waits for a slow sender does not advance. These are the places where y
 |---|---|---|
 | A connection | The same events at the same timestamps on every run. | A receiver waits for its senders. |
 | A connection with a delay | A receiver that runs ahead of its sender by up to the delay, and is still deterministic. | Each value arrives that much later in logical time. |
+| A physical connection | A receiver that never waits for its sender. | Each value gets its timestamp from the receiver's wall clock when it arrives, which differs between runs. `is_physical()` is true at such a timestamp. |
 | An action, or in Rust a future that raio does not provide | The event is handled when it arrives, and nothing waits for it. | Its timestamp comes from the wall clock and differs between runs. `is_physical()` is true at such a timestamp. |
 | `request_shutdown()` | Every node shuts down at one timestamp. | The nodes run on until that timestamp. |
 | ^C | Every node runs its shutdown function at once. | The nodes stop at different timestamps. |
@@ -165,6 +168,7 @@ node that waits for a slow sender does not advance. These are the places where y
 | Current timestamp | `node.now()` | `raio.now()` |
 | Events from threads | `Action<T>` and its `handle()` | `Action[T]` and its `send` |
 | Connect | `app.connect(&a.out, &b.input).delay(d)` | `raio.connect(a.out, b.inp, delay=d)` |
+| Connect physically | `app.connect(&a.out, &b.input).physical()` | `raio.connect(a.out, b.inp, physical=True)` |
 | Shut the app down | `node.request_shutdown()` | `raio.request_shutdown()` |
 | Run at shutdown | `.on_shutdown(Ticker::shutdown)` | `def shutdown(self)` |
 | Draw the app | `app.diagram("app.svg")` | `raio.diagram("app.svg", a, b)` |
@@ -178,17 +182,14 @@ places the nodes and routes the connections. To see one, run
 
 A node is shown by the name of its type, with its id in the corner, and a task by the name of
 its method. A port's name is inside its node, next to the port. A Python port has the name of
-its attribute. A Rust port gets the name of its field from `ports!`, and without it is shown
-by its position:
+its attribute. A Rust port has the name of the field that holds it, which `#[derive(Ports)]`
+reads; every Rust node derives it. A port that no field holds is shown by its position.
 
 ```rust
-impl Sensor {
-    fn new(builder: &mut Builder) -> Self {
-        ports!(Self {
-            node: builder.node(),
-            reading: builder.output(),
-        })
-    }
+#[derive(Ports)]
+struct Sensor {
+    node: Node,
+    reading: OutputPort<i64>,
 }
 ```
 
@@ -262,6 +263,7 @@ python -m pytest tests/
 
 #### Cargo
 ```bash
+cargo publish -p raio-macros
 cargo publish -p raio-rs --dry-run
 cargo publish -p raio-rs
 ```

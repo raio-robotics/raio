@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::messages::{Downstream, RegisterNode, Wiring};
+use crate::messages::{Downstream, RegisterNode, Upstream, Wiring};
 use crate::node::NodeId;
 use crate::time::Time;
 
@@ -26,6 +26,9 @@ pub struct Connection {
     pub from: PortId,
     pub to: PortId,
     pub delay: Time,
+    /// The receiver gives each value a timestamp from its own clock and never waits for the
+    /// sender.
+    pub physical: bool,
 }
 
 /// The nodes of an app and the connections between their ports.
@@ -40,7 +43,8 @@ impl Graph {
     /// Check the graph against the registered ports and return each node's wiring.
     ///
     /// A connection goes from an output to an input, the output has the serializer and the
-    /// transport that the input uses, and every input has exactly one connection.
+    /// transport that the input uses, and every input has exactly one connection. A physical
+    /// connection has no delay.
     ///
     /// An input starts with the earliest timestamp that its connection can deliver.
     pub(crate) fn wire(
@@ -79,6 +83,11 @@ impl Graph {
                     "input {to} has two connections; an input takes exactly one"
                 ));
             }
+            if connection.physical && connection.delay > Time::ZERO {
+                return Err(format!(
+                    "input {to} has a physical connection with a delay; it takes none"
+                ));
+            }
             connected.push(to);
             let wiring = wirings.get_mut(&from.node_id).unwrap();
             wiring
@@ -89,10 +98,18 @@ impl Graph {
                     input: input.clone(),
                     delay: connection.delay,
                 });
-            // No node sends at timestamp 0, which is complete when the app starts.
-            let ent = Time::ZERO.next_microstep() + connection.delay;
+            let ent = match connection.physical {
+                // A physical connection promises nothing, so its input never holds its node back.
+                true => Time::FOREVER,
+                // No node sends at timestamp 0, which is complete when the app starts.
+                false => Time::ZERO.next_microstep() + connection.delay,
+            };
+            let upstream = Upstream {
+                ent,
+                physical: connection.physical,
+            };
             let wiring = wirings.get_mut(&to.node_id).unwrap();
-            wiring.inputs.insert(to.port_id, ent);
+            wiring.inputs.insert(to.port_id, upstream);
         }
         for (node_id, node) in nodes {
             for input in &node.inputs {
@@ -154,6 +171,7 @@ pub(crate) mod tests {
             from: end(from),
             to: end(to),
             delay: Time::ZERO,
+            physical: false,
         }
     }
 
@@ -194,9 +212,37 @@ pub(crate) mod tests {
         let wirings = graph(delayed).wire(&nodes()).unwrap();
 
         assert!(wirings[&0].inputs.is_empty()); // The camera has no inputs.
+        let logical = |ent| Upstream {
+            ent,
+            physical: false,
+        };
         // The camera can first send at (0, 1), and a connection without a delay keeps that.
-        assert_eq!(wirings[&1].inputs[&0], Time::ZERO.next_microstep());
-        assert_eq!(wirings[&2].inputs[&3], 10 * MS); // A delay resets the microstep.
+        assert_eq!(wirings[&1].inputs[&0], logical(Time::ZERO.next_microstep()));
+        assert_eq!(wirings[&2].inputs[&3], logical(10 * MS)); // A delay resets the microstep.
+    }
+
+    #[test]
+    fn the_input_of_a_physical_connection_starts_with_nothing_to_wait_for() {
+        let mut connections = fan_out();
+        connections[1].physical = true;
+        let wirings = graph(connections).wire(&nodes()).unwrap();
+        let physical = Upstream {
+            ent: Time::FOREVER,
+            physical: true,
+        };
+        assert_eq!(wirings[&2].inputs[&3], physical);
+        assert!(!wirings[&1].inputs[&0].physical); // The other connection of the output is not.
+    }
+
+    #[test]
+    fn a_physical_connection_with_a_delay_is_refused() {
+        let mut connections = fan_out();
+        connections[1].physical = true;
+        connections[1].delay = 10 * MS;
+        assert_eq!(
+            refusal(connections, nodes()),
+            "input port 3 of node 2 has a physical connection with a delay; it takes none"
+        );
     }
 
     fn refusal(connections: Vec<Connection>, nodes: BTreeMap<NodeId, RegisterNode>) -> String {

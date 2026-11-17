@@ -1,9 +1,11 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::reaction;
 use raio::tasks;
 use raio::time::{MS, Time};
+use std::path::Path;
 use std::rc::Rc;
 
+#[derive(Ports)]
 struct Ticker {
     node: Node,
     out: OutputPort<i64>,
@@ -25,6 +27,7 @@ impl Ticker {
     }
 }
 
+#[derive(Ports)]
 struct Order {
     node: Node,
     a: InputPort<i64>,
@@ -72,5 +75,6 @@ fn main() {
     );
     app.connect(&ticker.out, &order.a);
     app.connect(&ticker.out, &order.b);
+    app.diagram(Path::new("reaction_order.svg"));
     app.run();
 }

@@ -1,10 +1,11 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
 use raio::tasks;
 use raio::time::{MS, S, Time};
 use std::rc::Rc;
 
 // Both tasks must finish before the node sends the timestamp's output.
 
+#[derive(Ports)]
 struct Ticker {
     node: Node,
     out: OutputPort<i64>,
@@ -26,6 +27,7 @@ impl Ticker {
     }
 }
 
+#[derive(Ports)]
 struct Worker {
     node: Node,
     input: InputPort<i64>,
@@ -52,6 +54,7 @@ impl Worker {
     }
 }
 
+#[derive(Ports)]
 struct Sink {
     input: InputPort<i64>,
 }

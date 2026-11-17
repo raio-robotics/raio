@@ -21,8 +21,9 @@ use crate::serializer::Serializer;
 use crate::time::Time;
 use crate::transport::{AnyTransport, Transport};
 pub use action::{Action, ActionHandle};
-pub use builder::{Builder, name_ports};
+pub use builder::{Builder, Field, OtherField, PortField, Ports};
 pub use port::{InputPort, OutputPort};
+pub use raio_macros::Ports;
 pub use reaction::{Trigger, next_event};
 use run::Runner;
 pub use run::{Assignment, CreatedNode, Start, create_node, run_node, run_node_as, run_node_on};
@@ -49,6 +50,7 @@ impl App {
             from: from.channel.setting.id,
             to: to.setting.id,
             delay: Time::ZERO,
+            physical: false,
         });
         ConnectionOptions {
             connection: self.connections.last_mut().unwrap(),
@@ -58,7 +60,7 @@ impl App {
     }
 
     /// Build a node; the process assigned to it runs this same node.
-    pub fn create_node<N: 'static>(
+    pub fn create_node<N: Ports + 'static>(
         &mut self,
         constructor: impl FnOnce(&mut Builder) -> N,
         tasks: Vec<Start<N>>,
@@ -117,6 +119,13 @@ impl<T> ConnectionOptions<'_, T> {
         self
     }
 
+    /// Give each value a timestamp from the receiver's clock when it arrives; the receiver never
+    /// waits for the sender. A physical connection takes no delay.
+    pub fn physical(self) -> Self {
+        self.connection.physical = true;
+        self
+    }
+
     /// Use this serializer for the connection.
     pub fn serializer(self, serializer: impl Serializer<T> + 'static) -> Self {
         let serializer: Rc<dyn Serializer<T>> = Rc::new(serializer);
@@ -144,10 +153,10 @@ mod tests {
     use super::*;
     use crate::diagram::PortKind;
     use crate::serializer::tests::Decimal;
+    use crate::tasks;
     use crate::time::MS;
     use crate::transport::Transport;
     use crate::transport::tests::Loopback;
-    use crate::{ports, tasks};
 
     /// Create an app with a source and a sink node, and return their ports.
     fn pair() -> (
@@ -169,11 +178,14 @@ mod tests {
         assert_eq!(connection.from.to_string(), "port 0 of node 0");
         assert_eq!(connection.to.to_string(), "port 0 of node 1");
         assert_eq!(connection.delay, Time::ZERO);
+        assert!(!connection.physical);
     }
 
     /// A node whose fields only give its ports their names.
     #[allow(dead_code)]
+    #[derive(Ports)]
     struct Camera {
+        node: Node,
         image: OutputPort<i64>,
         shutter: crate::app::Action<()>,
         exposure: InputPort<i64>,
@@ -182,11 +194,6 @@ mod tests {
     impl Camera {
         async fn capture(self: Rc<Self>) {}
         async fn expose(self: Rc<Self>) {}
-    }
-
-    #[allow(dead_code)]
-    struct Lens {
-        light: OutputPort<i64>,
     }
 
     /// The name and the kind of each port that a diagram shows of the app's second node.
@@ -199,38 +206,32 @@ mod tests {
     fn a_diagram_names_a_node_after_its_type_and_its_tasks_and_ports_after_methods_and_fields() {
         let mut app = App::new();
         let constructor = |builder: &mut Builder| {
-            ports!(Camera {
+            // The ports are added in another order than the fields are declared in.
+            let exposure = builder.input();
+            Camera {
+                node: builder.node(),
                 image: builder.output(),
                 shutter: builder.action(),
-                exposure: builder.input(),
-            })
+                exposure,
+            }
         };
         app.create_node(|builder| builder.output::<i64>(), Vec::new());
         app.create_node(constructor, tasks![Camera::capture, Camera::expose]);
         let camera = &app.nodes[1].diagram;
         assert_eq!(camera.name, "Camera");
         assert_eq!(camera.tasks, ["capture", "expose"]);
+        // A port has the name of the field that holds it, at the position it was added at.
         let ports = [
+            ("exposure", PortKind::Input),
             ("image", PortKind::Output),
             ("shutter", PortKind::Action),
-            ("exposure", PortKind::Input),
         ];
         assert_eq!(shown_ports(&app), ports);
     }
 
     #[test]
-    fn a_port_that_was_given_no_name_is_shown_by_its_position() {
-        let mut app = App::new();
-        app.create_node(
-            |builder| {
-                ports!(Lens {
-                    light: builder.output::<i64>()
-                })
-            },
-            Vec::new(),
-        );
-        // The names end with the node whose fields gave them.
-        app.create_node(|builder| builder.input::<i64>(), Vec::new());
+    fn a_port_that_no_field_holds_is_shown_by_its_position() {
+        let (app, _, _) = pair();
         assert_eq!(shown_ports(&app), [("0", PortKind::Input)]);
     }
 
@@ -242,6 +243,15 @@ mod tests {
         app.connect(&out, &other).delay(10 * MS);
         assert_eq!(app.connections.len(), 2);
         assert_eq!(app.connections[1].delay, 10 * MS);
+    }
+
+    #[test]
+    fn a_connection_is_physical_only_if_asked() {
+        let (mut app, out, input) = pair();
+        let other = app.create_node(|builder| builder.input::<i64>(), Vec::new());
+        app.connect(&out, &input).physical();
+        app.connect(&out, &other);
+        assert!(app.connections[0].physical && !app.connections[1].physical);
     }
 
     #[test]

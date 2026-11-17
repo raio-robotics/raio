@@ -1,8 +1,9 @@
-use raio::app::{App, Builder, Node};
+use raio::app::{App, Builder, Node, Ports};
 use raio::tasks;
 use raio::time::S;
 use std::rc::Rc;
 
+#[derive(Ports)]
 struct Ticker {
     node: Node,
 }
