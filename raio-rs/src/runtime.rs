@@ -1,58 +1,68 @@
+use core::task;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::task::{Context, Wake, Waker};
 
-struct Task {
-    future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    // Send: future is sent between threads, so it must be Send.
-    // Mutex: (1) poll needs &mut but Arc only gives & — runtime-checked exclusivity;
-    //        (2) makes Task Sync, required to share the Arc across threads (Waker::from bound).
-    //        (3) The mutex is only locked in the executor thread, so there is no contention.
-    task_sender: std::sync::mpsc::Sender<Arc<Task>>,
+type TaskId = usize;
+
+struct TaskWaker {
+    task_id: TaskId,
+    task_sender: Sender<TaskId>,
 }
 
-impl Wake for Task {
+impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        self.task_sender.send(self.clone()).unwrap();
+        self.task_sender.send(self.task_id).unwrap();
     }
 }
 
 pub struct Runtime {
-    ready_queue: std::sync::mpsc::Receiver<Arc<Task>>,
-    task_sender: std::sync::mpsc::Sender<Arc<Task>>,
+    task_receiver: Receiver<TaskId>,
+    task_sender: Sender<TaskId>,
+    tasks: RefCell<HashMap<usize, Pin<Box<dyn Future<Output = ()>>>>>,
+    next_task_id: Cell<TaskId>,
 }
 
 impl Runtime {
     pub fn new() -> Self {
-        let (task_sender, ready_queue) = std::sync::mpsc::channel();
+        let (task_sender, task_receiver) = channel();
         Self {
-            ready_queue,
-            task_sender: task_sender.clone(),
+            task_sender,
+            task_receiver,
+            tasks: RefCell::new(HashMap::new()),
+            next_task_id: Cell::new(0),
         }
     }
-    pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        // 'static: the task outlives every scope, so the future may not borrow from any.
-        let future = Box::pin(future);
-        let task = Task {
-            future: Mutex::new(future),
-            task_sender: self.task_sender.clone(),
-        };
-        self.task_sender.send(Arc::new(task)).unwrap();
+
+    pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> TaskId {
+        let task_id = self.next_task_id.get();
+        self.next_task_id.set(task_id + 1);
+        self.tasks.borrow_mut().insert(task_id, Box::pin(future));
+        self.task_sender.send(task_id).unwrap();
+        task_id
     }
-    pub fn block_on(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let root_task = Arc::new(Task {
-            future: Mutex::new(Box::pin(future)),
-            task_sender: self.task_sender.clone(),
-        });
-        self.task_sender.send(root_task.clone()).unwrap();
-        while let Ok(task) = self.ready_queue.recv() {
-            let waker = Waker::from(task.clone());
+
+    pub fn block_on(&self, future: impl Future<Output = ()> + 'static) {
+        let root_task_id = self.spawn(future);
+        while let Ok(task_id) = self.task_receiver.recv() {
+            let Some(mut task) = self.tasks.borrow_mut().remove(&task_id) else {
+                continue; // Waker outlived the task, disregard the wait
+            };
+            let waker = Waker::from(Arc::new(TaskWaker {
+                task_id,
+                task_sender: self.task_sender.clone(),
+            }));
             let mut context = Context::from_waker(&waker);
-            let ret = task.future.lock().unwrap().as_mut().poll(&mut context);
-            if ret.is_ready() && Arc::ptr_eq(&task, &root_task) {
-                break;
+            if task.as_mut().poll(&mut context).is_pending() {
+                self.tasks.borrow_mut().insert(task_id, task);
+            } else if task_id == root_task_id {
+                return;
+            } else {
+                continue;
             }
         }
     }
