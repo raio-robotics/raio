@@ -257,8 +257,11 @@ mod tests {
         let (port, channel) = InputPort::local(&scheduler);
         let (result, worker) = send_later(7);
         // The later-arriving input has an earlier timestamp than the deferred foreign resumption.
+        // Its thread waits for the worker, so the input arrives after the foreign result
+        // however late the worker runs.
         let (after, then) = oneshot::channel::<()>();
         let later = std::thread::spawn(move || {
+            worker.join().unwrap();
             std::thread::sleep(Duration::from_millis(15));
             after.send(()).unwrap();
         });
@@ -281,7 +284,6 @@ mod tests {
                 task_scheduler.is_physical(),
             )));
         });
-        worker.join().unwrap();
         later.join().unwrap();
 
         // The task can observe its foreign result at the input's timestamp.

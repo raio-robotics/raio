@@ -260,18 +260,20 @@ maturin develop
 python -m pytest tests/
 ```
 
-### Publish package
+### Release
 
-#### Cargo
-```bash
-cargo publish -p raio-macros
-cargo publish -p raio-rs --dry-run
-cargo publish -p raio-rs
-```
+`raio.__version__` (Python) and `raio::VERSION` (Rust) report the version. A build from a git
+checkout appends its commit hash, such as `0.2.0+abc1234`; a published package reports `0.2.0`.
 
-#### PyPI
-```bash
-cd python
-maturin build --release
-uv publish ../target/wheels/*
-```
+Releases are made on GitHub with [release-please](https://github.com/googleapis/release-please):
+
+1. On every push to `main`, release-please opens or updates a release pull request. It bumps
+   the version and writes `CHANGELOG.md` from the conventional commit messages: `fix` bumps the
+   patch version, `feat` the minor version, and a breaking change (`feat!`) the minor version
+   until 1.0.0 and the major version after. To choose the version yourself, push a commit whose
+   message ends with the line `Release-As: 1.0.0`.
+2. The pull request runs the tests and builds and tests every wheel. Merge it to release;
+   release-please then tags the commit `v<version>` and creates the GitHub release.
+3. The **Release** workflow runs the same checks on `main` and waits for a member of the Admin
+   team to approve the `release` environment. It then publishes `raio-macros` and `raio-rs` to
+   crates.io and the wheels to PyPI.

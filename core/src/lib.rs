@@ -91,3 +91,13 @@ pub mod runtime;
 pub mod serializer;
 pub mod time;
 pub mod transport;
+
+/// The version of raio, with the commit hash when built from a git checkout: `0.2.0+abc1234`.
+pub const VERSION: &str = const_format::concatcp!(
+    env!("CARGO_PKG_VERSION"),
+    git_version::git_version!(
+        args = ["--always", "--exclude=*", "--abbrev=7", "--dirty=.dirty"],
+        prefix = "+",
+        fallback = ""
+    )
+);

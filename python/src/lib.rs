@@ -17,6 +17,7 @@ use pyo3::prelude::*;
 /// The part of raio that runs on raio-rs: a node's runtime, its ports and its clock.
 #[pymodule]
 fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add("__version__", raio::VERSION)?;
     time::register(module)?;
     awaitable::register(module)?;
     combine::register(module)?;

@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "raio-py"
 description = "A deterministic realtime async runtime"
 readme = "../README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = "Apache-2.0"
 dynamic = ["version"]
 dependencies = ["cloudpickle", "msgpack"]

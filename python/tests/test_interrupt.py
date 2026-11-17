@@ -32,7 +32,7 @@ def start(script):
     """Start an app in a process group of its own, as it has in a terminal."""
     command = [sys.executable, str(script)]
     pipe = subprocess.PIPE
-    return subprocess.Popen(command, stdout=pipe, stderr=pipe, text=True, process_group=0)
+    return subprocess.Popen(command, stdout=pipe, stderr=pipe, text=True, start_new_session=True)
 
 
 def press_ctrl_c(app):

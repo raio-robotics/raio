@@ -12,14 +12,14 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::rc::Rc;
 
-/// The program that cargo built from an example.
+/// The program that cargo built from an example. It is in the `examples` directory of the
+/// profile directory (`target/debug`), which is some levels above this test's own program.
 fn example(name: &str) -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    path.pop();
-    path.push("examples");
-    path.push(name);
-    path
+    let test = std::env::current_exe().unwrap();
+    test.ancestors()
+        .map(|directory| directory.join("examples").join(name))
+        .find(|program| program.is_file())
+        .unwrap_or_else(|| panic!("no example program {name} above {}", test.display()))
 }
 
 fn run_example(name: &str) -> String {

@@ -1,0 +1,57 @@
+name: Wheels
+
+# Builds every wheel that a release publishes and runs the Python tests against each one.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wheel:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove the git metadata, so that the wheel reports the plain version
+        run: rm -rf .git
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          args: --release --out dist --interpreter python${{ matrix.python }}
+          manylinux: auto
+      - name: Install the wheel
+        run: pip install pytest python/dist/*.whl
+      - name: Python tests
+        working-directory: python
+        run: python -m pytest tests/ -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}-${{ matrix.python }}
+          path: python/dist/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the source distribution
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: python/dist/*.tar.gz
