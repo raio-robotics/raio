@@ -1,104 +1,71 @@
-# raio
+<!-- markdownlint-disable MD001 MD041 -->
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/raio-robotics/raio/main/docs/assets/logo/raio-lockup-white-rounded.png">
+    <img alt="RAIO" src="https://raw.githubusercontent.com/raio-robotics/raio/main/docs/assets/logo/raio-lockup-black-rounded.png" width=40%>
+  </picture>
+</p>
 
-raio is a deterministic realtime async runtime for robot software. An app is a set of **nodes**,
-each in its own process, that exchange values through **ports**. A node is written with
-`async`/`await`, in Rust or in Python, and one app can mix the two.
+<h3 align="center">
+RAIO: Realtime Asynchronous Deterministic Robotic Middleware
+</h3>
 
-Every value has a **timestamp**: a point in logical time. A node moves to a timestamp only once
-no node that feeds it can still send something earlier. So every run of an app sees the same
-events in the same order, however fast or slow each process happens to be, while logical time
-keeps pace with the wall clock.
+<p align="center">
+<a href="https://raio-robotics.com"><b>Docs</b></a> | <a href="https://raio-robotics.com/blog"><b>Blog</b></a> | <a href="https://join.slack.com/t/raio-hq/shared_invite/zt-4h90ce5q9-adb~cElnfDwekfEjcY0BtA"><b>Slack</b></a> |
+<a href="https://pypi.org/project/raio-py/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/raio-py" align="absmiddle"></a>
+<a href="https://crates.io/crates/raio-rs"><img alt="crates.io version" src="https://img.shields.io/crates/v/raio-rs" align="absmiddle"></a>
+<a href="https://github.com/raio-robotics/raio/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue" align="absmiddle"></a>
+</p>
 
-## A first app
+---
 
-A producer sends one value and a sink prints it.
+Raio is a realtime robotic middleware that is deterministic. Time is treated as a first order primitive, integrated with the `async` / `await` syntax.
 
-Rust (`core/examples/hello.rs`, run with `cargo run --example hello`):
+## Get Started
 
-```rust
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
-use raio::time::MS;
-use std::rc::Rc;
+Install Raio for Python 3.9 or later:
 
-#[derive(Ports)]
-struct Producer {
-    node: Node,
-    out: OutputPort<String>,
-}
-
-impl Producer {
-    fn new(builder: &mut Builder) -> Self {
-        Self {
-            node: builder.node(),
-            out: builder.output(),
-        }
-    }
-
-    async fn start(self: Rc<Self>) {
-        self.node.wait(1 * MS).await;
-        self.out.set("hello world".to_string());
-    }
-}
-
-#[derive(Ports)]
-struct Sink {
-    input: InputPort<String>,
-}
-
-impl Sink {
-    fn new(builder: &mut Builder) -> Self {
-        Self {
-            input: builder.input(),
-        }
-    }
-
-    async fn start(self: Rc<Self>) {
-        while let Some((value, _)) = self.input.wait().await {
-            println!("sink received {:?}", *value);
-        }
-    }
-}
-
-fn main() {
-    let mut app = App::new();
-    let producer = app.create_node(Producer::new, tasks![Producer::start]);
-    let sink = app.create_node(Sink::new, tasks![Sink::start]);
-    app.connect(&producer.out, &sink.input);
-    app.run();
-}
+```bash
+pip install raio-py
 ```
 
-Python (`python/examples/hello.py`, run with `python examples/hello.py`):
+Raio is built with Rust, to add it as a dependency:
+```bash
+cargo add raio-rs
+```
+
+## Hello World
+
+Two nodes, each in its own process: `Sender` sends a value and `Listener` prints it.
 
 ```python
 import raio
 from raio import MS, InputPort, Node, OutputPort, reaction, task
 
-
-class Producer(Node):
+class Sender(Node):
     out = OutputPort[str]()
 
     @task
-    async def produce(self):
+    async def send(self):
         await raio.wait(1 * MS)
         self.out.set("hello world")
 
-
-class Sink(Node):
+class Listener(Node):
     inp = InputPort[str]()
 
     @reaction(inp)
     def show(self):
-        print(f"sink received {self.inp.value!r}")
+        print(self.inp.value)
 
-
-producer, sink = Producer(), Sink()
-raio.connect(producer.out, sink.inp)
-raio.run(producer, sink)
+sender, listener = Sender(), Listener()
+raio.connect(sender.out, listener.inp)
+raio.run(sender, listener)
 ```
 
-More examples are in `core/examples` and `python/examples`.
+```console
+$ python hello.py
+hello world
+```
 
 ## Concepts
 
