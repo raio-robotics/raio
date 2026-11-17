@@ -1,3 +1,4 @@
+pub use crate::action::{Action, ActionHandle};
 use crate::coordinator::{Coordinator, register};
 use crate::messages::TaggedMessage;
 pub use crate::node::Node;
@@ -31,7 +32,7 @@ pub struct Edge {
     pub(crate) from: PortId,
     pub(crate) to: PortId,
     pub(crate) serialize: Box<dyn Fn(&Rc<dyn Any>) -> Option<Vec<u8>>>,
-    pub(crate) deliver: Box<dyn Fn(&Rc<dyn Any>, TaggedMessage)>,
+    pub(crate) deliver: Box<dyn Fn(&Rc<dyn Any>, &NodeContext, TaggedMessage)>,
     pub(crate) close: Box<dyn Fn(&Rc<dyn Any>)>,
     pub(crate) install_sender: Box<dyn Fn(&Rc<dyn Any>, OutputSender)>,
     pub(crate) listener_factory: ListenerFactory,
@@ -93,13 +94,21 @@ impl App {
                 .unwrap()
                 .install_sender(sender);
         });
-        let deliver = Box::new(move |channel: &Rc<dyn Any>, message: TaggedMessage| {
-            let channel = channel.clone().downcast::<InputChannel<T>>().unwrap();
-            if let Some(bytes) = message.value {
-                channel.push(message.timestamp + delay, serializer.deserialize(&bytes));
-            }
-            channel.update_remote_ent(message.ent + delay);
-        });
+        let deliver = Box::new(
+            move |channel: &Rc<dyn Any>, context: &NodeContext, message: TaggedMessage| {
+                let channel = channel.clone().downcast::<InputChannel<T>>().unwrap();
+                if let Some(bytes) = message.value {
+                    let value = serializer.deserialize(&bytes);
+                    if message.physical {
+                        // The sender's tag means nothing here: the value is retagged on arrival.
+                        channel.push_physical(context.physical_tag(delay), value);
+                    } else {
+                        channel.push(message.timestamp + delay, value);
+                    }
+                }
+                channel.update_remote_ent(message.ent + delay);
+            },
+        );
         let close = Box::new(|channel: &Rc<dyn Any>| {
             channel
                 .clone()
@@ -163,20 +172,27 @@ impl App {
                  than on its first run; constructors must be deterministic"
                 );
                 let ports = std::mem::take(&mut builder.ports);
+                for task in std::mem::take(&mut builder.action_tasks) {
+                    runtime.spawn(task);
+                }
                 let futures: Vec<_> = starts
                     .into_iter()
                     .map(|start| start(node.clone()))
                     .collect();
-                runtime.block_on(run_node(
-                    node_context,
-                    node_id,
-                    coordinator_endpoint,
-                    edges,
-                    ports,
-                    Box::pin(async move {
-                        join_all(futures).await;
-                    }),
-                ));
+                let idle_context = node_context.clone();
+                runtime.block_on_with_idle(
+                    run_node(
+                        node_context,
+                        node_id,
+                        coordinator_endpoint,
+                        edges,
+                        ports,
+                        Box::pin(async move {
+                            join_all(futures).await;
+                        }),
+                    ),
+                    move || idle_context.try_advance(),
+                );
             }));
         handle
     }
@@ -276,11 +292,12 @@ async fn run_node(
         let sender_channel = channel.clone();
         install_sender(
             &channel,
-            Box::new(move |completed, promise| {
+            Box::new(move |completed, promise, physical| {
                 let message = TaggedMessage {
                     timestamp: completed,
                     value: serialize(&sender_channel),
                     ent: promise,
+                    physical,
                 };
                 frames
                     .unbounded_send(SerdeSerializer.serialize(&message))
@@ -299,16 +316,13 @@ async fn run_node(
             .clone();
         let channel_at_eof = channel.clone();
         let deliver_context = context.clone();
-        let eof_context = context.clone();
         receive_futures.push(async move {
             receiver_factory(Box::new(move |frame| {
                 let message: TaggedMessage = SerdeSerializer.deserialize(&frame);
-                deliver(&channel, message);
-                deliver_context.try_advance();
+                deliver(&channel, &deliver_context, message);
             }))
             .await;
             close(&channel_at_eof);
-            eof_context.try_advance();
         });
     }
 
@@ -331,4 +345,64 @@ macro_rules! register {
             start
         }),+]
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::EventSource;
+    use crate::time::{MS, NS, S};
+    use std::time::{Duration, Instant};
+
+    /// One 10ms edge into a node whose clock stands at 5s.
+    fn edge_into_node_at_5s() -> (App, Rc<NodeContext>, Rc<InputChannel<i64>>) {
+        let mut app = App::new();
+        let ctx = Rc::new(NodeContext::new(Rc::new(Runtime::new())));
+        let mut builder = Builder::new(0, ctx.clone());
+        let out: OutputPort<i64> = builder.output();
+        let input: InputPort<i64> = builder.input();
+        app.connect_with::<TcpTransport, _, _>(&out, &input, SerdeSerializer, 10 * MS);
+        ctx.advance_to(5 * S);
+        (app, ctx, input.channel.clone())
+    }
+
+    fn frame(timestamp: Time, ent: Time, physical: bool) -> TaggedMessage {
+        TaggedMessage {
+            timestamp,
+            ent,
+            physical,
+            value: Some(SerdeSerializer.serialize(&7i64)),
+        }
+    }
+
+    #[test]
+    fn a_logical_frame_keeps_its_tag_plus_the_delay() {
+        let (app, ctx, channel) = edge_into_node_at_5s();
+        let any = channel.clone() as Rc<dyn Any>;
+        (app.edges[0].deliver)(&any, &ctx, frame(7 * S, 6 * S, false));
+        assert_eq!(channel.ready(), Some(7 * S + 10 * MS));
+        assert_eq!(channel.ent(), 6 * S + 10 * MS);
+    }
+
+    #[test]
+    fn a_physical_frame_is_restamped_on_arrival() {
+        let (app, ctx, channel) = edge_into_node_at_5s();
+        let any = channel.clone() as Rc<dyn Any>;
+        // The sender's tag (1s) and this node's wall clock (~0) are both in its past.
+        (app.edges[0].deliver)(&any, &ctx, frame(1 * S, 6 * S, true));
+        assert_eq!(channel.ready(), Some(5 * S + NS));
+        assert_eq!(channel.ent(), 6 * S + 10 * MS); // the promise is unaffected
+    }
+
+    #[test]
+    fn a_physical_frame_takes_the_wall_clock_when_it_is_later() {
+        let (app, ctx, channel) = edge_into_node_at_5s();
+        let any = channel.clone() as Rc<dyn Any>;
+        ctx.start_time.set(Instant::now() - Duration::from_secs(9)); // 9s of wall time have passed
+        // The promise (20s) is past the stamp, so the head is in hand.
+        (app.edges[0].deliver)(&any, &ctx, frame(1 * S, 20 * S, true));
+        let stamp = channel.ready().unwrap();
+        assert!(stamp >= 9 * S + 10 * MS, "{stamp}");
+        assert!(stamp < 10 * S, "{stamp}");
+    }
 }

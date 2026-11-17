@@ -6,16 +6,22 @@ use std::cell::Cell;
 use std::cell::Ref;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::option::Option;
 use std::rc::Rc;
 use std::task::Poll;
 use std::task::Waker;
 
+use crate::action::Action;
+use crate::app::BoxFuture;
 use crate::node::EventDrain;
 use crate::node::{Node, Timer};
+use crate::time::NS;
+use futures::StreamExt;
+use futures::channel::mpsc::unbounded;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Weak};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +31,7 @@ pub struct PortId {
     pub port_id: usize,
 }
 
-pub(crate) type InputQueue<T> = RefCell<VecDeque<(Time, T)>>;
+pub(crate) type InputQueue<T> = RefCell<BTreeMap<Time, (T, bool)>>;
 
 pub(crate) struct InputChannel<T> {
     queue: InputQueue<T>,
@@ -33,17 +39,19 @@ pub(crate) struct InputChannel<T> {
     latest_timestamp: Cell<Time>,
     wakers: RefCell<Vec<(Time, Waker)>>,
     remote_ent: Cell<Time>,
+    closed: Cell<bool>,
     delay: Time,
 }
 
 impl<T> InputChannel<T> {
     pub fn new(delay: Time) -> Self {
         Self {
-            queue: RefCell::new(VecDeque::new()),
+            queue: RefCell::new(BTreeMap::new()),
             latest_value: RefCell::new(None),
             latest_timestamp: Cell::new(Time::NEVER),
             wakers: RefCell::new(Vec::new()),
             remote_ent: Cell::new(Time::ZERO),
+            closed: Cell::new(false),
             delay,
         }
     }
@@ -53,24 +61,39 @@ impl<T> InputChannel<T> {
     }
 
     pub(crate) fn push(&self, timestamp: Time, value: T) {
-        {
-            let mut queue = self.queue.borrow_mut();
-            if let Some((last, _)) = queue.back() {
-                assert!(
-                    *last < timestamp,
-                    "edge delivered messages out of timestamp order: {last} then {timestamp}"
-                );
-            }
-            queue.push_back((timestamp, value));
+        assert!(
+            timestamp >= self.remote_ent.get(),
+            "InputChannel broke its ENT promise: {timestamp} arrived after promising {}",
+            self.remote_ent.get()
+        );
+        let evicted = self.queue.borrow_mut().insert(timestamp, (value, false));
+        if let Some((value, physical)) = evicted {
+            assert!(physical, "InputChannel pushed a logical value twice");
+            self.push_physical(timestamp + NS, value);
         }
     }
 
+    pub(crate) fn push_physical(&self, mut timestamp: Time, value: T) {
+        let mut queue = self.queue.borrow_mut();
+        while queue.contains_key(&timestamp) {
+            timestamp = timestamp + NS;
+        }
+        queue.insert(timestamp, (value, true));
+    }
+
     pub(crate) fn update_remote_ent(&self, ent: Time) {
-        self.remote_ent.set(ent + self.delay);
+        let promise = ent + self.delay;
+        assert!(
+            promise >= self.remote_ent.get(),
+            "edge lowered its ENT promise from {} to {promise}",
+            self.remote_ent.get()
+        );
+        self.remote_ent.set(promise);
     }
 
     pub(crate) fn close(&self) {
         self.update_remote_ent(Time::FOREVER);
+        self.closed.set(true);
         self.wake(Time::FOREVER); // waiters must learn that answer should be None
     }
 
@@ -88,28 +111,36 @@ impl<T> InputChannel<T> {
 
 impl<T> EventSource for InputChannel<T> {
     fn ent(&self) -> Time {
+        // The earliest queued logical value is promised; physical ones ahead of it are not.
         self.queue
             .borrow()
-            .front()
+            .iter()
+            .find(|(_, (_, physical))| !physical)
             .map_or(Time::FOREVER, |(timestamp, _)| *timestamp)
             .min(self.remote_ent.get())
     }
 
-    fn ready(&self) -> bool {
-        !self.queue.borrow().is_empty()
+    /// The queue head. A physical head is in hand only once the upstream's promise has passed it.
+    fn ready(&self) -> Option<Time> {
+        let queue = self.queue.borrow();
+        let (head, (_, physical)) = queue.first_key_value()?;
+        (!physical || *head < self.remote_ent.get()).then_some(*head)
     }
 
-    fn wake_wakers(&self, time: Time) {
+    fn wake_wakers(&self, time: Time) -> bool {
+        let mut physical = false;
         {
             let mut queue = self.queue.borrow_mut();
             let mut latest = self.latest_value.borrow_mut();
-            while queue.front().is_some_and(|(tag, _)| *tag <= time) {
-                let (timestamp, value) = queue.pop_front().unwrap();
+            while queue.first_key_value().is_some_and(|(tag, _)| *tag <= time) {
+                let (timestamp, (value, is_physical)) = queue.pop_first().unwrap();
                 self.latest_timestamp.set(timestamp);
                 *latest = Some(value);
+                physical |= is_physical;
             }
         }
         self.wake(time);
+        physical
     }
 }
 
@@ -144,14 +175,8 @@ impl<T> InputPort<T> {
             if self.channel.latest_timestamp.get() > called_at {
                 return Poll::Ready(self.latest());
             };
-            if self.channel.queue.borrow().is_empty()
-                && self.channel.remote_ent.get() == Time::FOREVER
-            {
+            if self.channel.queue.borrow().is_empty() && self.channel.closed.get() {
                 return Poll::Ready(None);
-            };
-            self.node_context.try_advance();
-            if self.channel.latest_timestamp.get() > called_at {
-                return Poll::Ready(self.latest());
             };
             self.channel.register_waker(called_at, cx.waker().clone());
             Poll::Pending
@@ -168,7 +193,7 @@ impl<T> InputPort<T> {
     }
 }
 
-pub(crate) type OutputSender = Box<dyn Fn(Time, Time)>;
+pub(crate) type OutputSender = Box<dyn Fn(Time, Time, bool)>;
 
 pub struct OutputChannel<T> {
     pub(crate) cell: RefCell<Option<T>>,
@@ -189,9 +214,9 @@ impl<T> OutputChannel<T> {
 }
 
 impl<T> EventDrain for OutputChannel<T> {
-    fn send(&self, timestamp: Time, ent: Time) {
+    fn send(&self, timestamp: Time, ent: Time, physical: bool) {
         for sender in self.senders.borrow().iter() {
-            sender(timestamp, ent);
+            sender(timestamp, ent, physical);
         }
     }
 
@@ -220,6 +245,7 @@ pub struct Builder {
     next_port_id: usize,
     context: Rc<NodeContext>,
     pub(crate) ports: HashMap<PortId, Rc<dyn Any>>,
+    pub(crate) action_tasks: Vec<BoxFuture<()>>,
 }
 
 impl Builder {
@@ -229,6 +255,7 @@ impl Builder {
             next_port_id: 0,
             context,
             ports: HashMap::new(),
+            action_tasks: Vec::new(),
         }
     }
 
@@ -245,6 +272,30 @@ impl Builder {
             id,
             channel,
             node_context: self.context.clone(),
+        }
+    }
+
+    pub fn action<T: Send + 'static>(&mut self) -> Action<T> {
+        let id = self.next_port_id();
+        let channel = Rc::new(InputChannel::new(Time::ZERO));
+        channel.update_remote_ent(Time::FOREVER); // every value is physical: nothing to promise
+        self.context.register_event_source(channel.clone());
+        let (sender, mut receiver) = unbounded::<T>();
+        let (action_channel, context) = (channel.clone(), self.context.clone());
+        self.action_tasks.push(Box::pin(async move {
+            while let Some(value) = receiver.next().await {
+                action_channel.push_physical(context.physical_tag(Time::ZERO), value);
+            }
+            action_channel.close(); // the last handle was dropped
+        }));
+        Action {
+            port: InputPort {
+                id,
+                channel,
+                node_context: self.context.clone(),
+            },
+            initial: RefCell::new(Some(Arc::new(sender))),
+            live: RefCell::new(Weak::new()),
         }
     }
 
@@ -316,11 +367,87 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "out of timestamp order")]
-    fn out_of_order_push_is_a_transport_bug() {
+    #[should_panic(expected = "broke its ENT promise")]
+    fn a_push_before_the_promise_is_an_edge_bug() {
         let ch = channel();
-        ch.push(2 * S, 1);
+        ch.update_remote_ent(2 * S);
         ch.push(1 * S, 2);
+    }
+
+    #[test]
+    fn physical_push_lands_in_timestamp_order() {
+        let ch = channel();
+        ch.push(5 * S, 50);
+        ch.push_physical(3 * S, 30); // restamped physical value, earlier than the queued head
+
+        ch.wake_wakers(3 * S);
+        assert_eq!(*ch.latest_value.borrow(), Some(30));
+        assert_eq!(ch.latest_timestamp.get(), 3 * S);
+        assert_eq!(ch.queue.borrow().len(), 1); // 5s still pending
+    }
+
+    #[test]
+    fn physical_push_skips_taken_tags() {
+        let ch = channel();
+        ch.push(3 * S, 1);
+        ch.push_physical(3 * S, 2);
+
+        ch.wake_wakers(3 * S);
+        assert_eq!(*ch.latest_value.borrow(), Some(1)); // the logical value keeps its tag
+        ch.wake_wakers(3 * S + NS);
+        assert_eq!(*ch.latest_value.borrow(), Some(2));
+    }
+
+    #[test]
+    fn logical_push_evicts_a_physical_occupant() {
+        let ch = channel();
+        ch.push_physical(3 * S, 2);
+        ch.push(3 * S, 1);
+
+        ch.wake_wakers(3 * S);
+        assert_eq!(*ch.latest_value.borrow(), Some(1));
+        ch.wake_wakers(3 * S + NS);
+        assert_eq!(*ch.latest_value.borrow(), Some(2)); // moved 1ns later
+    }
+
+    #[test]
+    fn a_logical_head_is_ready_regardless_of_the_promise() {
+        let ch = channel();
+        ch.push(1 * S, 1); // arrived in order: nothing logical can land before it
+        assert_eq!(ch.ready(), Some(1 * S));
+    }
+
+    #[test]
+    fn a_physical_head_waits_for_the_logical_promise() {
+        let ch = channel();
+        ch.push_physical(3 * S, 7);
+        ch.update_remote_ent(2 * S); // a logical value at 2s + 10ms may still land first
+        assert_eq!(ch.ready(), None);
+        assert_eq!(ch.ent(), 2 * S + 10 * MS);
+
+        ch.update_remote_ent(4 * S); // the promise passed 3s: the head is provably next
+        assert_eq!(ch.ready(), Some(3 * S));
+        assert_eq!(ch.ent(), 4 * S + 10 * MS); // a physical head is never promised
+    }
+
+    #[test]
+    fn ent_promises_only_logical_events() {
+        let ch = channel();
+        ch.update_remote_ent(5 * S);
+        ch.push(7 * S, 70);
+        ch.update_remote_ent(10 * S);
+        ch.push_physical(3 * S, 30);
+
+        assert_eq!(ch.ready(), Some(3 * S)); // delivered first
+        assert_eq!(ch.ent(), 7 * S); // but only the logical value is promised
+    }
+
+    #[test]
+    #[should_panic(expected = "lowered its ENT promise")]
+    fn a_promise_never_moves_backwards() {
+        let ch = channel();
+        ch.update_remote_ent(5 * S);
+        ch.update_remote_ent(4 * S);
     }
 
     #[test]
@@ -336,16 +463,19 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
         for edge in [1, 2] {
             let log = log.clone();
-            ch.install_sender(Box::new(move |timestamp, ent| {
-                log.borrow_mut().push((edge, timestamp, ent));
+            ch.install_sender(Box::new(move |timestamp, ent, physical| {
+                log.borrow_mut().push((edge, timestamp, ent, physical));
             }));
         }
 
-        ch.send(1 * S, 2 * S);
-        assert_eq!(*log.borrow(), vec![(1, 1 * S, 2 * S), (2, 1 * S, 2 * S)]);
+        ch.send(1 * S, 2 * S, true);
+        assert_eq!(
+            *log.borrow(),
+            vec![(1, 1 * S, 2 * S, true), (2, 1 * S, 2 * S, true)]
+        );
 
         ch.close();
-        ch.send(3 * S, 4 * S);
+        ch.send(3 * S, 4 * S, false);
         assert_eq!(log.borrow().len(), 2); // closed: senders dropped
     }
 
@@ -380,9 +510,11 @@ mod tests {
             (port, channel)
         }
 
-        /// Let woken tasks run until everything is parked again.
+        /// Let woken tasks run until everything is parked again, advancing at
+        /// each idle point the way a node's runner does.
         fn settle(&self) {
-            self.runtime.block_on(async {});
+            self.runtime
+                .block_on_with_idle(async {}, || self.ctx.try_advance());
         }
     }
 
@@ -403,17 +535,16 @@ mod tests {
         rig.settle(); // parks: empty queue, upstream open
         assert!(seen.borrow().is_empty());
 
-        // The receive-task contract: push + ENT + try_advance, one stretch.
+        // The receive-task contract: push + ENT; the idle point advances.
         channel.push(1 * S, 42);
         channel.update_remote_ent(2 * S);
-        rig.ctx.try_advance();
         rig.settle();
         assert_eq!(*seen.borrow(), vec![(42, 1 * S)]);
         assert_eq!(rig.ctx.now(), 1 * S);
 
         channel.close();
         rig.settle();
-        assert!(done.get()); // drained + FOREVER promise = None
+        assert!(done.get()); // drained + closed = None
     }
 
     #[test]
@@ -549,9 +680,48 @@ mod tests {
         channel.close(); // FOREVER promise; two values still queued
         rig.settle();
 
-        // wait's own try_advance cascades: 1s, then 2s, then None.
+        // The idle point cascades: 1s, then 2s, then None.
         assert_eq!(*seen.borrow(), vec![1, 2]);
         assert!(done.get());
         assert_eq!(rig.ctx.now(), 2 * S);
+    }
+
+    #[test]
+    fn a_forever_promise_is_not_a_close() {
+        let rig = Rig::new();
+        let (port, channel) = rig.port(0);
+        let done = Rc::new(Cell::new(false));
+
+        // No more logical values, but the upstream is still connected.
+        channel.update_remote_ent(Time::FOREVER);
+        let fin = done.clone();
+        rig.runtime.spawn(async move {
+            assert!(port.wait().await.is_none());
+            fin.set(true);
+        });
+        rig.settle();
+        assert!(!done.get()); // parked: a physical value may still arrive
+
+        channel.close();
+        rig.settle();
+        assert!(done.get());
+    }
+
+    #[test]
+    fn a_physical_value_marks_its_tag_and_only_its_tag() {
+        let rig = Rig::new();
+        let (_port, channel) = rig.port(0);
+
+        channel.push_physical(3 * S, 7);
+        channel.update_remote_ent(4 * S);
+        rig.ctx.try_advance();
+        assert_eq!(rig.ctx.now(), 3 * S);
+        assert!(rig.ctx.physical());
+
+        channel.push(5 * S, 1);
+        channel.update_remote_ent(6 * S);
+        rig.ctx.try_advance();
+        assert_eq!(rig.ctx.now(), 5 * S);
+        assert!(!rig.ctx.physical()); // physical mode lasts one tag
     }
 }

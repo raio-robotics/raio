@@ -1,12 +1,30 @@
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn run_example(name: &str) -> String {
+    run_example_with_input(name, "")
+}
+
+/// Run an example with `input` on its stdin, which the node processes inherit.
+fn run_example_with_input(name: &str, input: &str) -> String {
     let mut path = std::env::current_exe().unwrap();
     path.pop();
     path.pop();
     path.push("examples");
     path.push(name);
-    let output = Command::new(&path).output().unwrap();
+    let mut child = Command::new(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap(); // dropped here: the readers see EOF after the input
+    let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "{name} exited with {}",
@@ -85,5 +103,27 @@ fn reaction() {
          3600ms: left 3 at 3600ms, right 1 at 2s\n\
          4500ms: left 4 at 4500ms, right 1 at 2s\n\
          5400ms: left 5 at 5400ms, right 1 at 2s\n"
+    );
+}
+
+#[test]
+fn same_tag() {
+    let stdout = run_example("same_tag");
+    assert_eq!(
+        stdout,
+        "worker sets 7 at 700ms\n\
+         sink got 7 at 700ms\n"
+    );
+}
+
+#[test]
+fn action() {
+    let stdout = run_example_with_input("action", "raio");
+    assert_eq!(
+        stdout,
+        "echo r (physical: true)\n\
+         echo a (physical: true)\n\
+         echo i (physical: true)\n\
+         echo o (physical: true)\n"
     );
 }

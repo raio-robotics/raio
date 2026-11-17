@@ -15,5 +15,7 @@ pub type EndpointTable = HashMap<PortId, String>;
 pub struct TaggedMessage {
     pub timestamp: Time,
     pub ent: Time,
+    /// Physical messsages are re-stamped by the receiver.
+    pub physical: bool,
     pub value: Option<Vec<u8>>,
 }

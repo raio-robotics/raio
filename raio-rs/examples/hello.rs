@@ -34,7 +34,7 @@ impl Sink {
     }
 
     async fn start(self: Rc<Self>) {
-        while let Some((value, timestamp)) = self.input.wait().await {
+        while let Some((value, _)) = self.input.wait().await {
             println!("sink received {:?}", *value);
         }
     }
