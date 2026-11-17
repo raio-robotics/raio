@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
-NAMES = ["action", "hello", "join", "reaction", "same_tag", "select_first", "serializer", "sync"]
+NAMES = ["action", "hello", "join", "reaction", "same_tag", "select_first", "serializer"]
+NAMES += ["shutdown", "sync"]
 
 
 def run_example(name):
@@ -73,6 +74,17 @@ def test_select_first(finished):
 
 def test_serializer(finished):
     assert printed(finished, "serializer") == ["sink received 42"]
+
+
+def test_shutdown(finished):
+    assert sorted(printed(finished, "shutdown")) == [
+        "sink got 0 at 1ms",
+        "sink got 1 at 2ms",
+        "sink got 2 at 3ms",
+        "sink got 3 at 4ms",
+        "sink shut down at (4ms, 1)",
+        "ticker shut down at (4ms, 1)",
+    ]
 
 
 def test_sync(finished):

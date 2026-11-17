@@ -141,7 +141,8 @@ fn release_gil(wait: &mut dyn FnMut()) {
 ///
 /// `load` turns the code that the coordinator holds for the node into the kinds of the node's
 /// ports, the serializers that its connections chose for them, each with the port's position
-/// and its own name, and a function that returns the coroutines of its tasks.
+/// and its own name, a function that returns the coroutines of its tasks, and the node's
+/// shutdown method.
 #[pyfunction]
 fn run_node(
     py: Python<'_>,
@@ -158,8 +159,13 @@ fn run_node(
         PyRuntimeError::new_err(format!("the coordinator holds no code for node {node_id}"))
     })?;
     let loaded = load.call1(py, (PyBytes::new(py, &code),))?;
-    type Loaded = (Vec<String>, Vec<(usize, String, Py<PyAny>)>, Py<PyAny>);
-    let (kinds, serializers, start): Loaded = loaded.extract(py)?;
+    type Loaded = (
+        Vec<String>,
+        Vec<(usize, String, Py<PyAny>)>,
+        Py<PyAny>,
+        Py<PyAny>,
+    );
+    let (kinds, serializers, start, shutdown): Loaded = loaded.extract(py)?;
     let known = ["input", "output", "action"];
     if let Some(kind) = kinds.iter().find(|kind| !known.contains(&kind.as_str())) {
         return Err(PyValueError::new_err(format!("unknown port kind {kind:?}")));
@@ -221,7 +227,13 @@ fn run_node(
         })
     });
     Runtime::set_idle_hook(release_gil);
-    run_node_on(link, create_node(build, vec![start]));
+    let node = create_node(build, vec![start]).on_shutdown(move |running: &Running| {
+        // An error in the shutdown method fails the node, as an error in a task does.
+        if let Err(error) = Python::attach(|py| shutdown.call0(py)) {
+            running.fail(error);
+        }
+    });
+    run_node_on(link, node);
     SENDERS.lock().unwrap().clear(); // A value sent from now on finds its action closed.
     let failure = RUNNING.take().and_then(|running| running.failure.take());
     failure.map_or(Ok(()), Err)
@@ -260,6 +272,26 @@ fn sleep(duration: &PyTime) -> PyResult<Awaitable> {
     }))
 }
 
+/// Ask every node of the app to shut down a microstep after the latest of their current tags.
+#[pyfunction]
+fn request_shutdown() -> PyResult<()> {
+    running()?.node.request_shutdown();
+    Ok(())
+}
+
+/// Ask every node of the app to shut down `delay` after the latest of their current tags.
+#[pyfunction]
+fn request_shutdown_after(delay: &PyTime) -> PyResult<()> {
+    let (running, delay) = (running()?, delay.0);
+    if delay <= Time::ZERO {
+        return Err(PyValueError::new_err(
+            "request_shutdown_after needs a positive Time, such as 500 * MS",
+        ));
+    }
+    running.node.request_shutdown_after(delay);
+    Ok(())
+}
+
 /// Add this module's class and functions to the Python module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Task>()?;
@@ -269,5 +301,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(physical_now, module)?)?;
     module.add_function(wrap_pyfunction!(is_physical, module)?)?;
     module.add_function(wrap_pyfunction!(sleep, module)?)?;
+    module.add_function(wrap_pyfunction!(request_shutdown, module)?)?;
+    module.add_function(wrap_pyfunction!(request_shutdown_after, module)?)?;
     Ok(())
 }

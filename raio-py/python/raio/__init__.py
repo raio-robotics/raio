@@ -19,6 +19,8 @@ from ._rs.core import (
     is_physical,
     now,
     physical_now,
+    request_shutdown,
+    request_shutdown_after,
     select,
     sleep,
     spawn,
@@ -27,6 +29,6 @@ from ._rs.core import (
 __all__ = [
     "Action", "Closed", "InputPort", "Node", "OutputPort", "Serializer", "Task", "Time",
     "NS", "US", "MS", "S", "SECOND", "MINUTE", "HOUR",
-    "connect", "gather", "is_physical", "now", "physical_now", "reaction", "run", "select",
-    "sleep", "spawn", "task", "timeout",
+    "connect", "gather", "is_physical", "now", "physical_now", "reaction", "request_shutdown",
+    "request_shutdown_after", "run", "select", "sleep", "spawn", "task", "timeout",
 ]  # fmt: skip

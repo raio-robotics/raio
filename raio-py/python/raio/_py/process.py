@@ -18,7 +18,7 @@ def _load(code):
     path, payload = pickle.loads(code)
     sys.path[:] = path  # The node's classes are imported from where the launcher found them.
     node, serializers = cloudpickle.loads(payload)
-    return _kinds(node), serializers, lambda: _start(node)
+    return _kinds(node), serializers, lambda: _start(node), node.shutdown
 
 
 def main():

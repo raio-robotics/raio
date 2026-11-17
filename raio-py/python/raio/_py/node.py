@@ -51,6 +51,13 @@ class _NodeMeta(type):
 class Node(metaclass=_NodeMeta):
     """A unit of computation with its own process, ports, tasks, and logical clock."""
 
+    def shutdown(self) -> None:
+        """Run once when the node shuts down, with the app or on its own; override to use it.
+
+        When the app shuts down, this runs at the app's shutdown tag, where nothing else runs.
+        When the node finishes on its own, this runs at the node's last tag.
+        """
+
 
 def _kinds(node):
     """Name the kind of each port of a node, in order, for raio-rs."""
