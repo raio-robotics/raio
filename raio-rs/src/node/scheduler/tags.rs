@@ -83,7 +83,7 @@ impl NodeScheduler {
             // A tag with no due time is not paced by the wall clock.
             Some(tag) if self.due(tag).is_none_or(|due| due <= Instant::now()) => {
                 if self.shutdown.get() == Stage::At(tag) {
-                    self.stop(tag);
+                    self.stop(tag, false);
                 } else {
                     self.advance_to(tag);
                 }

@@ -15,6 +15,7 @@ name = "raio"
 [dependencies]
 bincode = {version = "2", features = ["serde"]}
 futures = "0.3.34"
+libc = "0.2" # Catches ^C in a launcher and ignores it in a node.
 polling = "3"
 serde = {version = "1.0", features = ["derive"]}
 

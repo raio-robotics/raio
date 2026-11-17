@@ -47,6 +47,12 @@ impl NodeScheduler {
             // Finish the current tag by sending its output and the node's ENT promise.
             self.send_frame(|| self.ent());
 
+            if self.shutdown.get() == Stage::Now {
+                // An interrupted node shuts down at a physical tag, ahead of all it has queued.
+                self.stop(self.mint_physical_tag(), true);
+                continue;
+            }
+
             let next = self.next_safe_tag();
             if self.advance_if_due(next) {
                 continue;

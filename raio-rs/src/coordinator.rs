@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::thread::JoinHandle;
 
 use futures::StreamExt;
-use futures::channel::mpsc::unbounded;
-use futures::future::join_all;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::future::{Either, join_all, select};
 
 use crate::app::{Assignment, Graph};
 use crate::messages::{Code, CoordinatorMessage, NodeMessage, RegisterNode, Reply, RequestCode};
@@ -23,6 +23,20 @@ pub const SERIALIZER: BincodeSerializer = BincodeSerializer;
 pub struct Coordinator<T: Transport, S> {
     listener: T::Listener,
     serializer: S,
+    interrupt: Interrupt,
+    interrupted: UnboundedReceiver<()>,
+}
+
+/// Tells a coordinator that its app was interrupted; any thread may hold one.
+#[derive(Clone)]
+pub struct Interrupt(UnboundedSender<()>);
+
+impl Interrupt {
+    /// Have every node shut down at once.
+    pub fn shutdown_now(&self) {
+        // A coordinator that has finished has no node left to tell.
+        let _ = self.0.unbounded_send(());
+    }
 }
 
 impl<T, S> Coordinator<T, S>
@@ -33,14 +47,22 @@ where
     S: Serializer<NodeMessage> + Serializer<CoordinatorMessage>,
 {
     pub async fn new(transport: T, serializer: S) -> Self {
+        let (interrupt, interrupted) = unbounded();
         Self {
             listener: transport.bind().await,
             serializer,
+            interrupt: Interrupt(interrupt),
+            interrupted,
         }
     }
 
     pub fn endpoint(&self) -> &str {
         self.listener.endpoint()
+    }
+
+    /// Return what a launcher calls when its app is interrupted.
+    pub fn interrupt(&self) -> Interrupt {
+        self.interrupt.clone()
     }
 
     /// Give every node its code, wire the nodes once all have registered, then serve them until
@@ -94,7 +116,8 @@ where
     }
 
     /// When a node asks for a shutdown, give every node the latest tag that any of them offers.
-    async fn coordinate_shutdown(&self, nodes: BTreeMap<usize, (T::Sender, T::Receiver)>) {
+    /// When the app is interrupted, tell every node to shut down at once.
+    async fn coordinate_shutdown(mut self, nodes: BTreeMap<usize, (T::Sender, T::Receiver)>) {
         let (events, mut received) = unbounded();
         let mut senders = BTreeMap::new();
         let mut readers = Vec::new();
@@ -114,13 +137,30 @@ where
             // The nodes still to offer a tag, once a shutdown has been requested.
             let mut waiting: Option<BTreeSet<usize>> = None;
             let mut latest = Time::NEVER;
-            while let Some((node_id, bytes)) = received.next().await {
+            let mut interrupted = false;
+            loop {
+                let event = match select(received.next(), self.interrupted.next()).await {
+                    Either::Left((event, _)) => event,
+                    Either::Right(_) => {
+                        // An interrupt replaces a shutdown that is under way, and happens once.
+                        if !interrupted {
+                            let now = CoordinatorMessage::ShutdownNow;
+                            Self::broadcast(&self.serializer, &mut senders, now).await;
+                        }
+                        (interrupted, waiting) = (true, None);
+                        continue;
+                    }
+                };
+                // The nodes have all disconnected once no event is left.
+                let Some((node_id, bytes)) = event else {
+                    break;
+                };
                 match bytes.map(|bytes| self.serializer.deserialize(&bytes)) {
                     Some(NodeMessage::RequestShutdown(delay)) => {
                         // One shutdown serves every request.
-                        if waiting.is_none() {
+                        if waiting.is_none() && !interrupted {
                             let ask = CoordinatorMessage::RequestNodeShutdown(delay);
-                            self.broadcast(&mut senders, ask).await;
+                            Self::broadcast(&self.serializer, &mut senders, ask).await;
                             waiting = Some(senders.keys().copied().collect());
                         }
                         continue;
@@ -133,7 +173,7 @@ where
                 };
                 if waiting.remove(&node_id) && waiting.is_empty() {
                     let shutdown = CoordinatorMessage::Shutdown(latest);
-                    self.broadcast(&mut senders, shutdown).await;
+                    Self::broadcast(&self.serializer, &mut senders, shutdown).await;
                 }
             }
         };
@@ -141,11 +181,11 @@ where
     }
 
     async fn broadcast(
-        &self,
+        serializer: &S,
         senders: &mut BTreeMap<usize, T::Sender>,
         message: CoordinatorMessage,
     ) {
-        let bytes = self.serializer.serialize(&message);
+        let bytes = serializer.serialize(&message);
         for sender in senders.values_mut() {
             sender.send(&bytes).await;
         }
@@ -182,22 +222,25 @@ impl Link {
     }
 }
 
-/// Run a coordinator for the graph on its own thread; return its endpoint and the thread.
+/// Run a coordinator for the graph on its own thread; return its endpoint, the thread, and
+/// what the launcher calls when the app is interrupted.
 ///
 /// `code` holds what each node gets when it asks for its code; a node written in Rust has none.
 pub fn spawn(
     graph: Graph,
     code: HashMap<NodeId, Vec<u8>>,
-) -> (String, JoinHandle<Result<(), String>>) {
+) -> (String, JoinHandle<Result<(), String>>, Interrupt) {
     let (announce, announced) = std::sync::mpsc::channel();
     let coordinator = std::thread::spawn(move || {
         Runtime::new().block_on(async move {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
-            announce.send(coordinator.endpoint().to_string()).unwrap();
+            let endpoint = coordinator.endpoint().to_string();
+            announce.send((endpoint, coordinator.interrupt())).unwrap();
             coordinator.run(graph, code).await
         })
     });
-    (announced.recv().unwrap(), coordinator)
+    let (endpoint, interrupt) = announced.recv().unwrap();
+    (endpoint, coordinator, interrupt)
 }
 
 #[cfg(test)]
@@ -326,12 +369,13 @@ mod tests {
         });
     }
 
-    /// Register a node whose current tag is `now`; return the shutdown tag the coordinator names.
+    /// Register a node whose current tag is `now`; return the message that shuts it down.
     fn spawn_node_until_shutdown(
         coordinator_endpoint: String,
         node_id: usize,
         now: Time,
-    ) -> std::thread::JoinHandle<Time> {
+        request: Option<Time>,
+    ) -> std::thread::JoinHandle<CoordinatorMessage> {
         std::thread::spawn(move || {
             let link = Link::open(Assignment {
                 node_id,
@@ -346,8 +390,8 @@ mod tests {
                 let reply: Reply = SERIALIZER
                     .deserialize(&sender.call(&SERIALIZER.serialize(&registration)).await);
                 reply.unwrap();
-                if node_id == 0 {
-                    let request = NodeMessage::RequestShutdown(Time::new(10));
+                if let Some(delay) = request {
+                    let request = NodeMessage::RequestShutdown(delay);
                     sender.send(&SERIALIZER.serialize(&request)).await;
                 }
                 loop {
@@ -356,7 +400,7 @@ mod tests {
                             let offer = NodeMessage::ShutdownTime(now + delay);
                             sender.send(&SERIALIZER.serialize(&offer)).await;
                         }
-                        CoordinatorMessage::Shutdown(tag) => return tag,
+                        shutdown => return shutdown,
                     }
                 }
             })
@@ -370,7 +414,11 @@ mod tests {
             let endpoint = coordinator.endpoint().to_string();
             let tags = [Time::new(3), Time::new(7), Time::new(5)];
             let children: Vec<_> = (0..3)
-                .map(|node_id| spawn_node_until_shutdown(endpoint.clone(), node_id, tags[node_id]))
+                .map(|node_id| {
+                    // The first node asks for a delay of 10ns after the latest tag.
+                    let request = (node_id == 0).then_some(Time::new(10));
+                    spawn_node_until_shutdown(endpoint.clone(), node_id, tags[node_id], request)
+                })
                 .collect();
             let unconnected = Graph {
                 nodes: 3,
@@ -378,8 +426,31 @@ mod tests {
             };
             assert_eq!(coordinator.run(unconnected, HashMap::new()).await, Ok(()));
             for child in children {
-                // The first node asked for a delay of 10ns after the latest tag.
-                assert_eq!(child.join().unwrap(), Time::new(17));
+                let shutdown = CoordinatorMessage::Shutdown(Time::new(17));
+                assert_eq!(child.join().unwrap(), shutdown);
+            }
+        });
+    }
+
+    #[test]
+    fn an_interrupt_tells_every_node_to_shut_down_at_once() {
+        Runtime::new().block_on(async {
+            let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
+            let endpoint = coordinator.endpoint().to_string();
+            // An interrupt that comes before the nodes are wired reaches them once they are.
+            coordinator.interrupt().shutdown_now();
+            let children: Vec<_> = (0..3)
+                .map(|node_id| {
+                    spawn_node_until_shutdown(endpoint.clone(), node_id, Time::ZERO, None)
+                })
+                .collect();
+            let unconnected = Graph {
+                nodes: 3,
+                connections: Vec::new(),
+            };
+            assert_eq!(coordinator.run(unconnected, HashMap::new()).await, Ok(()));
+            for child in children {
+                assert_eq!(child.join().unwrap(), CoordinatorMessage::ShutdownNow);
             }
         });
     }

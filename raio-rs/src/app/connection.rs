@@ -147,6 +147,7 @@ fn coordinator_link(
                         to_coordinator.unbounded_send(offer).unwrap();
                     }
                     CoordinatorMessage::Shutdown(tag) => scheduler.shut_down_at(tag),
+                    CoordinatorMessage::ShutdownNow => scheduler.shut_down_now(),
                 }
             }
         };

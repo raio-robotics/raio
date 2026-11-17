@@ -8,7 +8,8 @@ use raio::tasks;
 use raio::time::Time;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Output, Stdio};
 use std::rc::Rc;
 
@@ -190,7 +191,6 @@ fn serializer() {
     assert_eq!(stdout, "sink received 42\n");
 }
 
-/// Collects what the `node` example sends.
 #[test]
 fn shutdown() {
     let stdout = run_example("shutdown");
@@ -210,6 +210,34 @@ fn shutdown() {
     );
 }
 
+#[test]
+fn interrupt() {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    path.pop();
+    path.push("examples");
+    path.push("interrupt");
+    // The app gets a process group of its own, as it has in a terminal.
+    let mut app = Command::new(&path)
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut printed = BufReader::new(app.stdout.take().unwrap()).lines();
+    assert_eq!(printed.next().unwrap().unwrap(), "sink got 0 at 100ms");
+
+    // ^C in a terminal reaches the launcher and every node; only the launcher acts on it.
+    // SAFETY: The signal goes to the process group that this test created.
+    assert_eq!(unsafe { libc::kill(-(app.id() as i32), libc::SIGINT) }, 0);
+    let mut rest: Vec<String> = printed.map(Result::unwrap).collect();
+    assert!(app.wait().unwrap().success());
+    // Each node ran its shutdown function at once, after at most the tick that was under way.
+    rest.retain(|line| !line.starts_with("sink got"));
+    rest.sort();
+    assert_eq!(rest, ["sink shut down", "ticker shut down"]);
+}
+
+/// Collects what the `node` example sends.
 struct Collector {
     input: InputPort<String>,
     received: Rc<RefCell<Vec<String>>>,
@@ -246,7 +274,7 @@ fn launch(input: usize) -> Launched {
             delay: Time::ZERO,
         }],
     };
-    let (coordinator_endpoint, coordinator) = spawn(graph, HashMap::new());
+    let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());
     let assign = |node_id| Assignment {
         node_id,
         coordinator_endpoint: coordinator_endpoint.clone(),

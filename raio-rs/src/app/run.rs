@@ -154,6 +154,7 @@ pub fn run_node<N: 'static>(node: CreatedNode<N>) {
             Assignment::COORDINATOR_ENDPOINT
         );
     };
+    super::interrupt::ignore_interrupt();
     run_node_as(assignment, node);
 }
 
@@ -204,7 +205,7 @@ mod tests {
                 delay: Time::ZERO,
             }],
         };
-        let (coordinator_endpoint, coordinator) = spawn(graph, HashMap::new());
+        let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());
         let assign = |node_id| Assignment {
             node_id,
             coordinator_endpoint: coordinator_endpoint.clone(),
@@ -255,7 +256,7 @@ mod tests {
                 delay: Time::ZERO,
             }],
         };
-        let (coordinator_endpoint, coordinator) = spawn(graph, HashMap::new());
+        let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());
         let assign = |node_id| Assignment {
             node_id,
             coordinator_endpoint: coordinator_endpoint.clone(),

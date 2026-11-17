@@ -4,6 +4,7 @@ use std::thread::JoinHandle;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use raio::app::{Connection, Graph, PortId};
+use raio::coordinator::Interrupt;
 use raio::time::Time;
 
 /// The coordinator of an app, running on its own thread.
@@ -11,6 +12,7 @@ use raio::time::Time;
 struct Coordinator {
     endpoint: String,
     thread: Option<JoinHandle<Result<(), String>>>,
+    interrupt: Interrupt,
 }
 
 #[pymethods]
@@ -26,6 +28,11 @@ impl Coordinator {
         self.thread
             .as_ref()
             .is_none_or(|thread| thread.is_finished())
+    }
+
+    /// Have every node of the app shut down at once; the launcher calls this on ^C.
+    fn shutdown_now(&self) {
+        self.interrupt.shutdown_now();
     }
 
     /// Wait until every node has disconnected; raise if the coordinator refused the graph.
@@ -60,10 +67,12 @@ fn coordinator(nodes: usize, connections: Vec<Edge>, code: HashMap<usize, Vec<u8
             },
         )
         .collect();
-    let (endpoint, thread) = raio::coordinator::spawn(Graph { nodes, connections }, code);
+    let graph = Graph { nodes, connections };
+    let (endpoint, thread, interrupt) = raio::coordinator::spawn(graph, code);
     Coordinator {
         endpoint,
         thread: Some(thread),
+        interrupt,
     }
 }
 

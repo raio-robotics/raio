@@ -70,7 +70,7 @@ fn reactions_keep_their_order_when_only_some_ports_have_a_value() {
         nodes: 3,
         connections: vec![connect(0, 0), connect(1, 1)],
     };
-    let (coordinator_endpoint, coordinator) = spawn(graph, HashMap::new());
+    let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());
     let assign = |node_id| Assignment {
         node_id,
         coordinator_endpoint: coordinator_endpoint.clone(),

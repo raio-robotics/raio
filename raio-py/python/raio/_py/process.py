@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import pickle
+import signal
 import sys
 
 import cloudpickle
@@ -27,6 +28,8 @@ def main():
     parser.add_argument("--coordinator_endpoint", required=True)
     parser.add_argument("--fast_forward", action="store_true")
     args = parser.parse_args()
+    # ^C is left to the launcher, which shuts the nodes down through the coordinator.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     buffer_output_by_line()
     core.run_node(args.node_id, args.coordinator_endpoint, _load, args.fast_forward)
 

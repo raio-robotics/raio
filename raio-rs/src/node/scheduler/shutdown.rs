@@ -10,6 +10,8 @@ pub(super) enum Stage {
     Held(Time),
     /// The node shuts down at this tag.
     At(Time),
+    /// The app was interrupted: the node shuts down as soon as its current tag is complete.
+    Now,
     /// The node has shut down; only frame transfer still runs.
     Done,
 }
@@ -22,7 +24,7 @@ impl Stage {
             Stage::Held(offer) => queued.filter(|tag| *tag < offer),
             // The shutdown tag follows every earlier event and replaces every later one.
             Stage::At(shutdown) => Some(queued.map_or(shutdown, |tag| tag.min(shutdown))),
-            Stage::Done => None,
+            Stage::Now | Stage::Done => None,
         }
     }
 }
@@ -59,11 +61,18 @@ impl NodeScheduler {
         self.shutdown.set(Stage::At(tag));
     }
 
+    /// Shut down as soon as the current tag is complete, whatever the node has queued.
+    pub(crate) fn shut_down_now(&self) {
+        if self.shutdown.get() != Stage::Done {
+            self.shutdown.set(Stage::Now);
+        }
+    }
+
     /// Move to the shutdown tag and shut down there; no task runs at that tag or after it.
-    pub(super) fn stop(&self, tag: Time) {
+    pub(super) fn stop(&self, tag: Time, physical: bool) {
         self.now.set(tag);
         self.tag_complete.set(false);
-        self.physical.set(false);
+        self.physical.set(physical);
         self.shut_down();
         self.shutdown.set(Stage::Done);
     }
@@ -185,6 +194,38 @@ mod tests {
             vec![(3 * MS, 5 * MS, false), (5 * MS, Time::FOREVER, false)]
         );
         assert!(sink.closed.get());
+    }
+
+    #[test]
+    fn an_interrupted_node_shuts_down_at_once_at_a_physical_tag() {
+        let (_runtime, scheduler, sink) = node_rig();
+        let node = Node {
+            scheduler: scheduler.clone(),
+        };
+        let woke = Rc::new(Cell::new(false));
+        let stopped = Rc::new(Cell::new(None));
+        let (out, clock) = (stopped.clone(), scheduler.clone());
+        *scheduler.shutdown_function.borrow_mut() = Some(Box::new(move || {
+            out.set(Some((clock.now(), clock.is_physical())));
+        }));
+        let out = woke.clone();
+        scheduler.spawn(async move {
+            node.wait(1 * S).await;
+            out.set(true);
+        });
+
+        scheduler.shut_down_now();
+        scheduler.run_until_idle();
+        // The node does not go on to the tag that its task waits for.
+        let (tag, physical) = stopped.get().unwrap();
+        assert!(tag > Time::ZERO && tag < 1 * S, "{tag}");
+        assert!(physical);
+        assert_eq!(*sink.sent.borrow(), vec![(tag, Time::FOREVER, true)]);
+        assert!(sink.closed.get());
+
+        scheduler.run_until_idle();
+        assert!(!woke.get()); // No task runs after the shutdown.
+        assert_eq!(scheduler.now(), tag);
     }
 
     #[test]

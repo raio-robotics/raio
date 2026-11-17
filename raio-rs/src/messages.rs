@@ -68,6 +68,8 @@ pub enum CoordinatorMessage {
     RequestNodeShutdown(Time),
     /// Shut down at this tag, the latest that any node offered.
     Shutdown(Time),
+    /// Shut down at once: the app was interrupted.
+    ShutdownNow,
 }
 
 /// A connection's output for one tag, including its ENT promise and optional serialized value.

@@ -1,6 +1,7 @@
 mod builder;
 mod connection;
 pub(crate) mod graph;
+mod interrupt;
 mod port;
 mod run;
 mod setting;
@@ -64,7 +65,10 @@ impl App {
     /// Run this process's node, or launch a process for each node and coordinate them.
     pub fn run(self) {
         match Assignment::from_args() {
-            Some(assignment) => self.nodes[assignment.node_id].run(Link::open(assignment)),
+            Some(assignment) => {
+                interrupt::ignore_interrupt();
+                self.nodes[assignment.node_id].run(Link::open(assignment))
+            }
             None => launch(Graph {
                 nodes: self.nodes.len(),
                 connections: self.connections,
@@ -79,7 +83,9 @@ fn launch(graph: Graph) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let nodes = graph.nodes;
     // Every node is this program, so the coordinator holds no code for them.
-    let (endpoint, coordinator) = coordinator::spawn(graph, HashMap::new());
+    let (endpoint, coordinator, interrupt) = coordinator::spawn(graph, HashMap::new());
+    // On ^C every node runs its shutdown function at once, and the app ends as it otherwise does.
+    interrupt::on_interrupt(move || interrupt.shutdown_now());
     let children: Vec<_> = (0..nodes)
         .map(|node_id| {
             let assignment = Assignment {

@@ -103,8 +103,15 @@ def _launch(nodes, coordinator, fast_forward):
             if status != 0:
                 failed = (index, status)
                 break
-    except BaseException:
-        end_processes(children)
+    except BaseException as error:
+        try:
+            if isinstance(error, KeyboardInterrupt) and len(children) == len(nodes):
+                # On ^C every node runs its shutdown method at once and then ends by itself.
+                coordinator.shutdown_now()
+                for child in children:
+                    child.wait()
+        finally:
+            end_processes(children)  # A second ^C, or any other error, ends the nodes at once.
         raise
     if failed is None:
         coordinator.join()
