@@ -1,5 +1,5 @@
 import raio
-from raio import MS, InputPort, Node, OutputPort, task
+from raio import MS, InputPort, Node, OutputPort, reaction, task
 
 
 class Producer(Node):
@@ -14,10 +14,9 @@ class Producer(Node):
 class Sink(Node):
     inp = InputPort[str]()
 
-    @task
-    async def show(self):
-        async for value in self.inp:
-            print(f"sink received {value!r}")
+    @reaction(inp)
+    def show(self):
+        print(f"sink received {self.inp.value!r}")
 
 
 producer, sink = Producer(), Sink()
