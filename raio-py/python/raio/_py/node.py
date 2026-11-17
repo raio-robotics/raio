@@ -54,7 +54,7 @@ class Node(metaclass=_NodeMeta):
 
 def _kinds(node):
     """Name the kind of each port of a node, in order, for raio-rs."""
-    return ["input" if isinstance(port, InputPort) else "output" for port in node._ports]
+    return [port._kind for port in node._ports]
 
 
 async def _arrives(port):

@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyStopAsyncIteration, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyBytes;
-use raio::app::{InputPort, OutputPort};
+use raio::app::{Action, ActionHandle, InputPort, OutputPort};
 use raio::serializer::{Payload, Serializer};
 use raio::time::Time;
 
@@ -65,7 +67,12 @@ impl Payload for PyValue {
 pub(crate) enum Port {
     Input(InputPort<PyValue>),
     Output(OutputPort<PyValue>),
+    Action(Action<PyValue>),
 }
+
+/// The sending end of each open action of this process's node, by the action's position.
+pub(crate) static SENDERS: Mutex<BTreeMap<usize, ActionHandle<PyValue>>> =
+    Mutex::new(BTreeMap::new());
 
 fn not_an(kind: &str, index: usize) -> PyErr {
     PyTypeError::new_err(format!("port {index} of this node is not an {kind}"))
@@ -143,6 +150,24 @@ fn input_wait(index: usize, label: String, iterating: bool) -> PyResult<Awaitabl
     }))
 }
 
+/// Deliver a value to an action at a fresh physical tag; any thread may call this.
+#[pyfunction]
+fn action_send(index: usize, label: String, value: Py<PyAny>) -> PyResult<()> {
+    match SENDERS.lock().unwrap().get(&index) {
+        Some(sender) => {
+            sender.send(PyValue(value));
+            Ok(())
+        }
+        None => Err(PyRuntimeError::new_err(format!("{label} is closed"))),
+    }
+}
+
+/// End an action after the values already sent; any thread may call this.
+#[pyfunction]
+fn action_close(index: usize) {
+    SENDERS.lock().unwrap().remove(&index); // Dropping the only sender closes the action.
+}
+
 /// Add this module's exception and functions to the Python module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Closed", module.py().get_type::<Closed>())?;
@@ -153,5 +178,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(input_present, module)?)?;
     module.add_function(wrap_pyfunction!(input_closed, module)?)?;
     module.add_function(wrap_pyfunction!(input_wait, module)?)?;
+    module.add_function(wrap_pyfunction!(action_send, module)?)?;
+    module.add_function(wrap_pyfunction!(action_close, module)?)?;
     Ok(())
 }

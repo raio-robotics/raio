@@ -34,6 +34,11 @@ impl<T> Action<T> {
         ActionHandle { sender }
     }
 
+    /// The input at which the action's values arrive.
+    pub fn port(&self) -> &InputPort<T> {
+        &self.port
+    }
+
     pub fn get(&self) -> Option<Ref<'_, T>> {
         self.port.get()
     }

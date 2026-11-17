@@ -1,4 +1,4 @@
-"""The ports of a node: inputs and outputs."""
+"""The ports of a node: inputs, actions, and outputs."""
 
 from __future__ import annotations
 
@@ -38,6 +38,8 @@ class _Port(Generic[T]):
 class InputPort(_Port[T]):
     """Receives the values of one connected output port."""
 
+    _kind = "input"  # the name by which raio-rs builds the port
+
     @property
     def value(self) -> T | None:
         """The latest value, or None before the first one."""
@@ -70,8 +72,24 @@ class InputPort(_Port[T]):
         return core.input_wait(self._use(), repr(self), True)
 
 
+class Action(InputPort[T]):
+    """Receives values sent from any thread as physical events."""
+
+    _kind = "action"
+
+    def send(self, value: T) -> None:
+        """Deliver a value at a fresh physical tag."""
+        core.action_send(self._use(), repr(self), value)
+
+    def close(self) -> None:
+        """End the action after the values already sent."""
+        core.action_close(self._use())
+
+
 class OutputPort(_Port[T]):
     """Sends at most one value per tag to every connected input port."""
+
+    _kind = "output"
 
     def set(self, value: T) -> None:
         """Set the value sent when the current tag completes."""

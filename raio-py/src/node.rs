@@ -15,7 +15,7 @@ use raio::runtime::{Runtime, TaskId, WakeKind};
 use raio::time::Time;
 
 use crate::awaitable::{Awaitable, PyFuture, to_future};
-use crate::ports::{Closed, Port, PyValue};
+use crate::ports::{Closed, Port, PyValue, SENDERS};
 use crate::time::PyTime;
 
 /// The node that runs on this thread: its clock, its ports and the error that stopped it.
@@ -37,10 +37,11 @@ pub(crate) fn running() -> PyResult<Rc<Running>> {
 }
 
 impl Running {
-    /// Return the input at this position among the node's ports.
+    /// Return the input at this position among the node's ports; an action has one too.
     pub(crate) fn input(&self, index: usize) -> PyResult<&InputPort<PyValue>> {
         match self.ports.get(index) {
             Some(Port::Input(input)) => Ok(input),
+            Some(Port::Action(action)) => Ok(action.port()),
             _ => Err(PyValueError::new_err(format!(
                 "port {index} of this node is not an input"
             ))),
@@ -157,10 +158,8 @@ fn run_node(
     })?;
     let loaded = load.call1(py, (PyBytes::new(py, &code),))?;
     let (kinds, start): (Vec<String>, Py<PyAny>) = loaded.extract(py)?;
-    if let Some(kind) = kinds
-        .iter()
-        .find(|kind| *kind != "input" && *kind != "output")
-    {
+    let known = ["input", "output", "action"];
+    if let Some(kind) = kinds.iter().find(|kind| !known.contains(&kind.as_str())) {
         return Err(PyValueError::new_err(format!("unknown port kind {kind:?}")));
     }
     // The ports are built in the order Python numbered them.
@@ -168,10 +167,19 @@ fn run_node(
         if fast_forward {
             builder.execution_mode(ExecutionMode::FastForward);
         }
-        let ports = kinds.iter().map(|kind| match kind.as_str() {
-            "input" => Port::Input(builder.input()),
-            _ => Port::Output(builder.output()),
-        });
+        let ports = kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| match kind.as_str() {
+                "input" => Port::Input(builder.input()),
+                "output" => Port::Output(builder.output()),
+                _ => {
+                    let action = builder.action();
+                    // The sender is kept where any thread of this process can reach it.
+                    SENDERS.lock().unwrap().insert(index, action.handle());
+                    Port::Action(action)
+                }
+            });
         Running {
             ports: ports.collect(),
             node: builder.node(),
@@ -201,6 +209,7 @@ fn run_node(
     });
     Runtime::set_idle_hook(release_gil);
     run_node_on(link, create_node(build, vec![start]));
+    SENDERS.lock().unwrap().clear(); // A value sent from now on finds its action closed.
     let failure = RUNNING.take().and_then(|running| running.failure.take());
     failure.map_or(Ok(()), Err)
 }

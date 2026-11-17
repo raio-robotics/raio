@@ -6,13 +6,14 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
-NAMES = ["hello", "join", "reaction", "same_tag", "select_first", "sync"]
+NAMES = ["action", "hello", "join", "reaction", "same_tag", "select_first", "sync"]
 
 
 def run_example(name):
     """Run an example script to its end."""
     command = [sys.executable, str(EXAMPLES / f"{name}.py")]
-    return subprocess.run(command, capture_output=True, text=True, timeout=60)
+    keys = "raio" if name == "action" else ""  # The action example reads its keys from stdin.
+    return subprocess.run(command, input=keys, capture_output=True, text=True, timeout=60)
 
 
 @pytest.fixture(scope="module")
@@ -27,6 +28,10 @@ def printed(finished, name):
     result = finished[name]
     assert result.returncode == 0, result.stderr
     return result.stdout.splitlines()
+
+
+def test_action(finished):
+    assert printed(finished, "action") == [f"echo {key} (physical: True)" for key in "raio"]
 
 
 def test_hello(finished):
