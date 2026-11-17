@@ -60,7 +60,17 @@ impl Coordinator {
 
 /// A connection as Python gives it: source node and port, target node and port, and the
 /// delay in nanoseconds.
-type PyConnection = (usize, usize, usize, usize, i64);
+pub(crate) type PyConnection = (usize, usize, usize, usize, i64);
+
+pub(crate) fn connection(connection: PyConnection) -> Connection {
+    let (from_node, from_port, to_node, to_port, delay) = connection;
+    let port = |node_id, port_id| PortId { node_id, port_id };
+    Connection {
+        from: port(from_node, from_port),
+        to: port(to_node, to_port),
+        delay: Time::new(delay),
+    }
+}
 
 /// Start the coordinator of an app with this many nodes and these connections.
 ///
@@ -71,17 +81,7 @@ fn coordinator(
     connections: Vec<PyConnection>,
     code: HashMap<usize, Vec<u8>>,
 ) -> Coordinator {
-    let port = |node_id, port_id| PortId { node_id, port_id };
-    let connections = connections
-        .into_iter()
-        .map(
-            |(from_node, from_port, to_node, to_port, delay)| Connection {
-                from: port(from_node, from_port),
-                to: port(to_node, to_port),
-                delay: Time::new(delay),
-            },
-        )
-        .collect();
+    let connections = connections.into_iter().map(connection).collect();
     let graph = Graph { nodes, connections };
     let (endpoint, thread, handle) = raio::coordinator::spawn(graph, code);
     Coordinator {

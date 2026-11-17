@@ -11,6 +11,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyStopAsyncIteration};
 use pyo3::prelude::*;
 use raio::app::{Action, ActionHandle, InputPort, OutputPort, Trigger};
+use raio::diagram::PortKind;
 use raio::time::Time;
 
 use crate::awaitable::Awaitable;
@@ -30,6 +31,16 @@ pub(crate) enum Port {
     Input(InputPort<PyValue>),
     Output(OutputPort<PyValue>),
     Action(Action<PyValue>),
+}
+
+/// Return the kind of a port from the name that the Python half has for it.
+pub(crate) fn port_kind(name: &str) -> PortKind {
+    match name {
+        "input" => PortKind::Input,
+        "output" => PortKind::Output,
+        "action" => PortKind::Action,
+        name => panic!("unknown port kind {name:?}"),
+    }
 }
 
 /// The latest value of an input or an action, and its timestamp.

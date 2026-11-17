@@ -14,11 +14,13 @@ name = "raio"
 
 [dependencies]
 bincode = {version = "2", features = ["serde"]}
+elkrs = "0.1" # Lays out the diagram of an app.
 futures = "0.3.34"
 libc = "0.2" # Catches ^C in a launcher and ignores it in a node.
 polling = "3"
 rmp-serde = "1" # MessagePack, the serializer that nodes in other languages share.
 serde = {version = "1.0", features = ["derive"]}
+serde_json = "1" # The graph that elkrs takes and returns.
 
 [dev-dependencies]
 async-io = "2" # Supplies the external timer used by the foreign-future example.

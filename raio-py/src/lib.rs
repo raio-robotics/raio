@@ -4,6 +4,7 @@
 mod awaitable;
 mod combine;
 mod coordinator;
+mod diagram;
 mod node;
 mod ports;
 mod run;
@@ -23,5 +24,6 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     node::register(module)?;
     task::register(module)?;
     run::register(module)?;
+    diagram::register(module)?;
     coordinator::register(module)
 }

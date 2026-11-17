@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pickle
 import subprocess
 import sys
@@ -44,16 +45,7 @@ def run(*nodes: Node, fast_forward: bool = False) -> None:
     """Run each node in its own process until all of them finish."""
     if states.running is not None:
         raise RuntimeError("raio.run cannot be called from inside a node")
-    if not nodes:
-        raise ValueError("run needs at least one node")
-    positions = {}
-    for node in nodes:
-        if not isinstance(node, Node):
-            raise TypeError(f"run takes node instances, got {node!r}")
-        if id(node) in positions:
-            raise ValueError(f"{type(node).__name__} was given to run twice")
-        positions[id(node)] = len(positions)
-    connections, serializers = _wire(positions)
+    connections, serializers = _wire(_positions("run", nodes))
     # Pickling comes first, so that a node that cannot be sent fails before anything starts.
     # Each node's process imports from the same places as this one, so the path goes with it.
     code = {}
@@ -62,6 +54,30 @@ def run(*nodes: Node, fast_forward: bool = False) -> None:
             code[index] = pickle.dumps((sys.path, cloudpickle.dumps((node, serializers[index]))))
     coordinator = core.coordinator(len(nodes), connections, code)
     _launch(nodes, coordinator, fast_forward)
+
+
+def diagram(path: str | os.PathLike, *nodes: Node) -> None:
+    """Draw the nodes and their connections to an SVG file, in the style of Lingua Franca."""
+    connections, _ = _wire(_positions("diagram", nodes))
+    shown = []
+    for node in nodes:
+        ports = [(port._name, port._kind) for port in node._ports]
+        shown.append((type(node).__name__, ports, node._tasks))
+    core.diagram(path, shown, connections)
+
+
+def _positions(caller, nodes):
+    """Map the id of each node of an app to the node's position in it."""
+    if not nodes:
+        raise ValueError(f"{caller} needs at least one node")
+    positions = {}
+    for node in nodes:
+        if not isinstance(node, Node):
+            raise TypeError(f"{caller} takes node instances, got {node!r}")
+        if id(node) in positions:
+            raise ValueError(f"{type(node).__name__} was given to {caller} twice")
+        positions[id(node)] = len(positions)
+    return positions
 
 
 def _wire(positions):

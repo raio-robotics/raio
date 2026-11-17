@@ -9,11 +9,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use raio::app::{Builder, ExecutionMode, Start, create_node, run_node_on};
 use raio::coordinator::Link;
+use raio::diagram::PortKind;
 use raio::runtime::Runtime;
 
 use crate::awaitable::to_future;
 use crate::node::{RUNNING, RunningNode};
-use crate::ports::{ACTION_SENDERS, Port};
+use crate::ports::{ACTION_SENDERS, Port, port_kind};
 use crate::serializer::PySerializer;
 use crate::task::spawn_task;
 
@@ -38,10 +39,10 @@ fn build_ports(
     let ports = kinds
         .iter()
         .enumerate()
-        .map(|(index, kind)| match kind.as_str() {
-            "input" => Port::Input(builder.input()),
-            "output" => Port::Output(builder.output()),
-            "action" => {
+        .map(|(index, kind)| match port_kind(kind) {
+            PortKind::Input => Port::Input(builder.input()),
+            PortKind::Output => Port::Output(builder.output()),
+            PortKind::Action => {
                 let action = builder.action();
                 ACTION_SENDERS
                     .lock()
@@ -49,7 +50,6 @@ fn build_ports(
                     .insert(index, action.handle());
                 Port::Action(action)
             }
-            kind => panic!("unknown port kind {kind:?}"),
         });
     let ports: Vec<Port> = ports.collect();
     for (index, name, serializer) in serializers {
@@ -132,7 +132,9 @@ fn run_node(
             failure: RefCell::new(None),
         }
     };
-    let start: Start<RunningNode> = Box::new(move |running| Box::pin(start_tasks(running, start)));
+    let start = Start::new("start", move |running| {
+        Box::pin(start_tasks(running, start))
+    });
     Runtime::set_idle_hook(release_gil);
     let node = create_node(build, vec![start]).on_shutdown(move |running: &RunningNode| {
         // An error in the shutdown method fails the node, as an error in a task does.

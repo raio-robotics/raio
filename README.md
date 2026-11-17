@@ -163,6 +163,30 @@ node that waits for a slow sender does not advance. These are the places where y
 | Connect | `app.connect(&a.out, &b.input).delay(d)` | `raio.connect(a.out, b.inp, delay=d)` |
 | Shut the app down | `node.request_shutdown()` | `raio.request_shutdown()` |
 | Run at shutdown | `.on_shutdown(Ticker::shutdown)` | `def shutdown(self)` |
+| Draw the app | `app.diagram("app.svg")` | `raio.diagram("app.svg", a, b)` |
+
+## Diagram
+
+`diagram` draws an app to an SVG file in the style of Lingua Franca: each node with its ports
+and its tasks, and each connection with its delay. [elkrs](https://github.com/depetrol/elkrs)
+places the nodes and routes the connections. To see one, run
+`cargo run --example diagram -- app.svg`.
+
+A node is shown by the name of its type, with its id in the corner, and a task by the name of
+its method. A port's name is inside its node, next to the port. A Python port has the name of
+its attribute. A Rust port gets the name of its field from `ports!`, and without it is shown
+by its position:
+
+```rust
+impl Sensor {
+    fn new(builder: &mut Builder) -> Self {
+        ports!(Self {
+            node: builder.node(),
+            reading: builder.output(),
+        })
+    }
+}
+```
 
 ## Rust and Python in one app
 
@@ -195,6 +219,7 @@ raio-rs/src
   app/           what a node program is written with: App, ports, actions, reactions, connections
   node/          the scheduler that orders the events of one node by timestamp
   coordinator/   the graph of an app; wires its nodes at startup and shuts them down
+  diagram/       draws an app in the style of Lingua Franca
   messages.rs    what crosses process boundaries
   serializer/    converting port values to and from bytes
   transport/     carrying bytes between processes

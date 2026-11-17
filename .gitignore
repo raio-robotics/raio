@@ -1,5 +1,8 @@
 target/
 
+# Diagrams
+**/*.svg
+
 # Python
 **/__pycache__/
 **/.pytest_cache/

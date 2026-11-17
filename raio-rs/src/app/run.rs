@@ -9,24 +9,45 @@ use std::rc::Rc;
 use super::builder::Builder;
 use super::connection::connect_node;
 use crate::coordinator::Link;
+use crate::diagram::DiagramNode;
 use crate::node::{NodeId, NodeScheduler};
-use crate::runtime::Runtime;
+use crate::runtime::{BoxFuture, Runtime};
 
 type Run = Box<dyn FnOnce(Link)>;
 
-/// Wires and runs one built node; taken by the one caller that runs it.
+/// One built node as its app holds it: what wires and runs the node, which the one caller that
+/// runs it takes, and what a diagram shows of the node.
 #[derive(Clone)]
-pub(super) struct Runner(Rc<RefCell<Option<Run>>>);
+pub(super) struct Runner {
+    run: Rc<RefCell<Option<Run>>>,
+    pub(super) diagram: DiagramNode,
+}
 
 impl Runner {
     pub(super) fn run(&self, link: Link) {
-        let run = self.0.take().expect("the node has already run");
+        let run = self.run.take().expect("the node has already run");
         run(link);
     }
 }
 
-/// Starts one task of a node: it takes the node and returns the task's future.
-pub type Start<N> = Box<dyn FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>>>;
+/// One task of a node: its name, and what starts it, which takes the node and returns the
+/// task's future.
+pub struct Start<N> {
+    name: &'static str,
+    start: Box<dyn FnOnce(Rc<N>) -> BoxFuture<()>>,
+}
+
+impl<N> Start<N> {
+    pub fn new(
+        name: &'static str,
+        start: impl FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>> + 'static,
+    ) -> Self {
+        Self {
+            name,
+            start: Box::new(start),
+        }
+    }
+}
 
 /// A node's place in an app, as its launcher assigned it.
 pub struct Assignment {
@@ -94,6 +115,25 @@ impl<N> Deref for CreatedNode<N> {
     }
 }
 
+/// Drop the module paths from the name of a type: `a::Camera<b::Image>` is `Camera<Image>`.
+fn short(type_name: &str) -> String {
+    let mut pieces: Vec<&str> = type_name.split("::").collect();
+    let last = pieces.pop().unwrap();
+    let is_name = |c: char| c.is_alphanumeric() || c == '_';
+    let kept = pieces.iter().map(|piece| piece.trim_end_matches(is_name));
+    kept.chain([last]).collect()
+}
+
+/// Name a task after the function that `tasks!` was given for it, without the function's path.
+fn task_name(expression: &str) -> &str {
+    let name = expression.rsplit("::").next().unwrap();
+    let is_name = |c: char| c.is_alphanumeric() || c == '_';
+    match name.chars().all(is_name) {
+        true => name,
+        false => "task",
+    }
+}
+
 impl<N: 'static> CreatedNode<N> {
     pub(super) fn new(
         node_id: NodeId,
@@ -104,6 +144,14 @@ impl<N: 'static> CreatedNode<N> {
         let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
         let mut builder = Builder::new(node_id, scheduler.clone());
         let node = Rc::new(constructor(&mut builder));
+        let diagram = DiagramNode {
+            name: short(std::any::type_name::<N>()),
+            ports: builder.ports.clone(),
+            tasks: tasks
+                .iter()
+                .map(|task| task_name(task.name).to_string())
+                .collect(),
+        };
         let (running, handle) = (node.clone(), scheduler.clone());
         // Wire the node through the coordinator and run it until it finishes.
         let run = move |link: Link| {
@@ -117,14 +165,17 @@ impl<N: 'static> CreatedNode<N> {
             };
             let tasks = tasks
                 .into_iter()
-                .map(|start| start(running.clone()))
+                .map(|task| (task.start)(running.clone()))
                 .collect();
             scheduler.run(frame_transfer, tasks);
         };
         Self {
             node,
             scheduler: handle,
-            runner: Runner(Rc::new(RefCell::new(Some(Box::new(run))))),
+            runner: Runner {
+                run: Rc::new(RefCell::new(Some(Box::new(run)))),
+                diagram,
+            },
         }
     }
 
@@ -171,15 +222,15 @@ pub fn run_node_on<N: 'static>(link: Link, node: CreatedNode<N>) {
     node.runner.run(link);
 }
 
-/// Package async node methods as startup tasks for `create_node`.
+/// Package async node methods as startup tasks for `create_node`; each task is named after its
+/// method.
 #[macro_export]
 macro_rules! tasks {
     ($($start:expr),+ $(,)?) => {
-        vec![$({
-            let start: $crate::app::Start<_> =
-                Box::new(move |node| Box::pin($start(node)));
-            start
-        }),+]
+        vec![$($crate::app::Start::new(
+            stringify!($start),
+            move |node| Box::pin($start(node)),
+        )),+]
     };
 }
 
@@ -230,7 +281,7 @@ mod tests {
 
         let assignment = assign(0);
         let source = std::thread::spawn(move || {
-            let start: Start<(Node, OutputPort<i64>)> = Box::new(|source| {
+            let start = Start::<(Node, OutputPort<i64>)>::new("start", |source| {
                 Box::pin(async move {
                     source.0.wait(1 * MS).await;
                     source.1.set(7);
@@ -245,7 +296,7 @@ mod tests {
         let sink = std::thread::spawn(move || {
             let received = Rc::new(std::cell::Cell::new(None));
             let seen = received.clone();
-            let start: Start<InputPort<i64>> = Box::new(move |input| {
+            let start = Start::<InputPort<i64>>::new("start", move |input| {
                 Box::pin(async move { seen.set(input.wait().await.map(|(value, _)| *value)) })
             });
             let sink = create_node(|builder| builder.input(), vec![start]);
@@ -265,7 +316,7 @@ mod tests {
 
         let assignment = assign(0);
         let source = std::thread::spawn(move || {
-            let start: Start<(Node, OutputPort<i64>)> = Box::new(|source| {
+            let start = Start::<(Node, OutputPort<i64>)>::new("start", |source| {
                 Box::pin(async move {
                     // This task never ends on its own.
                     let mut count = 0;
@@ -287,7 +338,7 @@ mod tests {
         let sink = std::thread::spawn(move || {
             let received = Rc::new(RefCell::new(Vec::new()));
             let seen = received.clone();
-            let start: Start<(Node, InputPort<i64>)> = Box::new(move |sink| {
+            let start = Start::<(Node, InputPort<i64>)>::new("start", move |sink| {
                 Box::pin(async move {
                     while let Some((value, timestamp)) = sink.1.wait().await {
                         seen.borrow_mut().push(timestamp);
@@ -353,7 +404,7 @@ mod tests {
     fn waiting_node() -> (CreatedNode<Node>, [Rc<std::cell::Cell<bool>>; 2]) {
         let flags = [(); 2].map(|_| Rc::new(std::cell::Cell::new(false)));
         let [started, shut_down] = flags.clone();
-        let start: Start<Node> = Box::new(move |node| {
+        let start = Start::<Node>::new("start", move |node| {
             Box::pin(async move {
                 started.set(true);
                 node.wait(HOUR).await;
@@ -388,6 +439,22 @@ mod tests {
         let node: CreatedNode<OutputPort<i64>> =
             create_node(|builder| builder.output(), Vec::new());
         run_node(node);
+    }
+
+    #[test]
+    fn a_type_is_shown_without_the_paths_of_its_modules() {
+        assert_eq!(short("hello::Producer"), "Producer");
+        let pair = "(raio::node::Node, raio::app::port::OutputPort<i64>)";
+        assert_eq!(short(pair), "(Node, OutputPort<i64>)");
+    }
+
+    #[test]
+    fn a_task_is_named_after_its_method_if_it_has_one() {
+        assert_eq!(task_name("Producer::start"), "start");
+        assert_eq!(
+            task_name("|ticker: Rc<Ticker>| ticker.start(period)"),
+            "task"
+        );
     }
 
     fn program(args: &[&str]) -> Vec<String> {

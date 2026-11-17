@@ -264,6 +264,36 @@ fn silent() {
     assert!(errors.contains("node 1 stopped responding"), "{errors}");
 }
 
+#[test]
+fn diagram() {
+    let path = std::env::temp_dir().join(format!("raio-diagram-{}.svg", std::process::id()));
+    let output = Command::new(example("diagram"))
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    // The app runs as it does without a diagram.
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "motor drives 10 at 1ms\nmotor drives 20 at 2ms\nmotor drives 30 at 3ms\n"
+    );
+    let svg = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(svg.starts_with("<svg") && svg.ends_with("</svg>\n"));
+    // A node has the name of its type, a task that of its method, and a port that of its field.
+    let nodes = ["Sensor", "Controller", "Motor", "Logger"];
+    let inside = ["sample", "control", "drive", "log", "reading", "command"];
+    for name in nodes.into_iter().chain(inside) {
+        assert!(
+            svg.contains(&format!(">{name}</text>")),
+            "{name} is missing"
+        );
+    }
+    assert_eq!(svg.matches("class=\"connection\"").count(), 4);
+    assert_eq!(svg.matches("class=\"port\"").count(), 6);
+    assert!(svg.contains(">5ms</text>"));
+}
+
 /// Collects what the `node` example sends.
 struct Collector {
     input: InputPort<String>,

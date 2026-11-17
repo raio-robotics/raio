@@ -66,11 +66,13 @@
 //! - [`node`]: the scheduler that orders the events of one node by timestamp.
 //! - [`coordinator`] and [`messages`]: the graph of an app, and how its nodes are wired and shut
 //!   down together.
+//! - [`diagram`]: a picture of an app, with its nodes, their tasks, and their connections.
 //! - [`runtime`] and [`driver`]: the single-threaded executor under each node, and its I/O and
 //!   timers.
 
 pub mod app;
 pub mod coordinator;
+pub mod diagram;
 pub mod driver;
 pub mod messages;
 pub mod node;

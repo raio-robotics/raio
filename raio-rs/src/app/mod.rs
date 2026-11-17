@@ -11,15 +11,17 @@ mod reaction;
 mod run;
 mod setting;
 
+use std::path::Path;
 use std::rc::Rc;
 
 use crate::coordinator::{Connection, Graph, Link};
+use crate::diagram::Diagram;
 pub use crate::node::{ExecutionMode, Node};
 use crate::serializer::Serializer;
 use crate::time::Time;
 use crate::transport::{AnyTransport, Transport};
 pub use action::{Action, ActionHandle};
-pub use builder::Builder;
+pub use builder::{Builder, name_ports};
 pub use port::{InputPort, OutputPort};
 pub use reaction::{Trigger, next_event};
 use run::Runner;
@@ -64,6 +66,25 @@ impl App {
         let created = CreatedNode::new(self.nodes.len(), constructor, tasks);
         self.nodes.push(created.runner.clone());
         created
+    }
+
+    /// Draw the app's nodes and connections to an SVG file, in the style of Lingua Franca.
+    pub fn diagram(&self, path: impl AsRef<Path>) {
+        // The process of each node runs this program too; only the launcher draws.
+        if Assignment::from_args().is_some() {
+            return;
+        }
+        let diagram = Diagram {
+            nodes: self.nodes.iter().map(|node| node.diagram.clone()).collect(),
+            connections: self.connections.clone(),
+        };
+        let written = diagram.write(&path);
+        written.unwrap_or_else(|error| {
+            panic!(
+                "cannot write the diagram to {}: {error}",
+                path.as_ref().display()
+            )
+        });
     }
 
     /// Run this process's node, or launch a process for each node and coordinate them.
@@ -121,10 +142,12 @@ impl<T> ConnectionOptions<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagram::PortKind;
     use crate::serializer::tests::Decimal;
     use crate::time::MS;
     use crate::transport::Transport;
     use crate::transport::tests::Loopback;
+    use crate::{ports, tasks};
 
     /// Create an app with a source and a sink node, and return their ports.
     fn pair() -> (
@@ -146,6 +169,69 @@ mod tests {
         assert_eq!(connection.from.to_string(), "port 0 of node 0");
         assert_eq!(connection.to.to_string(), "port 0 of node 1");
         assert_eq!(connection.delay, Time::ZERO);
+    }
+
+    /// A node whose fields only give its ports their names.
+    #[allow(dead_code)]
+    struct Camera {
+        image: OutputPort<i64>,
+        shutter: crate::app::Action<()>,
+        exposure: InputPort<i64>,
+    }
+
+    impl Camera {
+        async fn capture(self: Rc<Self>) {}
+        async fn expose(self: Rc<Self>) {}
+    }
+
+    #[allow(dead_code)]
+    struct Lens {
+        light: OutputPort<i64>,
+    }
+
+    /// The name and the kind of each port that a diagram shows of the app's second node.
+    fn shown_ports(app: &App) -> Vec<(&str, PortKind)> {
+        let ports = app.nodes[1].diagram.ports.iter();
+        ports.map(|(name, kind)| (name.as_str(), *kind)).collect()
+    }
+
+    #[test]
+    fn a_diagram_names_a_node_after_its_type_and_its_tasks_and_ports_after_methods_and_fields() {
+        let mut app = App::new();
+        let constructor = |builder: &mut Builder| {
+            ports!(Camera {
+                image: builder.output(),
+                shutter: builder.action(),
+                exposure: builder.input(),
+            })
+        };
+        app.create_node(|builder| builder.output::<i64>(), Vec::new());
+        app.create_node(constructor, tasks![Camera::capture, Camera::expose]);
+        let camera = &app.nodes[1].diagram;
+        assert_eq!(camera.name, "Camera");
+        assert_eq!(camera.tasks, ["capture", "expose"]);
+        let ports = [
+            ("image", PortKind::Output),
+            ("shutter", PortKind::Action),
+            ("exposure", PortKind::Input),
+        ];
+        assert_eq!(shown_ports(&app), ports);
+    }
+
+    #[test]
+    fn a_port_that_was_given_no_name_is_shown_by_its_position() {
+        let mut app = App::new();
+        app.create_node(
+            |builder| {
+                ports!(Lens {
+                    light: builder.output::<i64>()
+                })
+            },
+            Vec::new(),
+        );
+        // The names end with the node whose fields gave them.
+        app.create_node(|builder| builder.input::<i64>(), Vec::new());
+        assert_eq!(shown_ports(&app), [("0", PortKind::Input)]);
     }
 
     #[test]
