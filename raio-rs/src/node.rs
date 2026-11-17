@@ -9,7 +9,7 @@ pub type NodeId = usize;
 use std::task::Poll;
 
 use std::task::Waker;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub trait EventSource {
     /// Earliest Next Timestamp: the timestamp of the earliest next event that this source will produce.
