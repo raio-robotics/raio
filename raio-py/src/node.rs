@@ -1,5 +1,8 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::future::poll_fn;
 use std::rc::Rc;
+use std::task::{Poll, Waker};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -8,10 +11,10 @@ use raio::app::{
     Assignment, Builder, ExecutionMode, InputPort, Node, Start, create_node, run_node_on,
 };
 use raio::coordinator::Link;
-use raio::runtime::Runtime;
+use raio::runtime::{Runtime, TaskId, WakeKind};
 use raio::time::Time;
 
-use crate::awaitable::{Awaitable, Coroutine};
+use crate::awaitable::{Awaitable, PyFuture, to_future};
 use crate::ports::{Closed, Port, PyValue};
 use crate::time::PyTime;
 
@@ -51,14 +54,69 @@ impl Running {
     }
 }
 
-/// Run one task to its end; an error other than `Closed` fails the node.
-async fn run_task(running: Rc<Running>, coroutine: Py<PyAny>) {
-    let outcome = Coroutine::new(coroutine).await;
+/// Run one task to its end and return its result; an error other than `Closed` fails the node.
+async fn run_task(running: Rc<Running>, task: PyFuture) -> Option<Py<PyAny>> {
+    let outcome = task.await;
     Python::attach(|py| match outcome {
-        Ok(_) => {}
-        Err(error) if error.is_instance_of::<Closed>(py) => {} // A closed port ends a task quietly.
-        Err(error) => running.fail(error),
+        Ok(result) => Some(result),
+        // A closed port ends a task quietly.
+        Err(error) if error.is_instance_of::<Closed>(py) => Some(py.None()),
+        Err(error) => {
+            running.fail(error);
+            None
+        }
     })
+}
+
+/// A coroutine running as its own task of the node.
+#[pyclass(unsendable, module = "raio")]
+#[derive(Default)]
+struct Task {
+    result: Rc<RefCell<Option<Py<PyAny>>>>,
+    /// The tasks that wait for the result.
+    joiners: Rc<RefCell<BTreeMap<TaskId, Waker>>>,
+}
+
+#[pymethods]
+impl Task {
+    /// True if the task has finished.
+    fn done(&self) -> bool {
+        self.result.borrow().is_some()
+    }
+
+    /// Wait for the task and return its result.
+    fn __await__(&self) -> Awaitable {
+        let (result, joiners) = (self.result.clone(), self.joiners.clone());
+        Awaitable::new(poll_fn(move |cx| {
+            if let Some(result) = &*result.borrow() {
+                return Poll::Ready(Python::attach(|py| Ok(result.clone_ref(py))));
+            }
+            let waker = Runtime::waker(cx, WakeKind::Resume);
+            joiners
+                .borrow_mut()
+                .insert(Runtime::current_task(cx), waker);
+            Poll::Pending
+        }))
+    }
+}
+
+/// Start a coroutine as another task of this node.
+#[pyfunction]
+fn spawn(coroutine: &Bound<'_, PyAny>) -> PyResult<Task> {
+    let (running, future) = (running()?, to_future(coroutine)?);
+    let task = Task::default();
+    let (runner, result, joiners) = (running.clone(), task.result.clone(), task.joiners.clone());
+    running.node.spawn(async move {
+        // A task that failed has stopped the node, so no task is left to wait for it.
+        let Some(finished) = run_task(runner, future).await else {
+            return;
+        };
+        *result.borrow_mut() = Some(finished);
+        for (_, joiner) in std::mem::take(&mut *joiners.borrow_mut()) {
+            joiner.wake();
+        }
+    });
+    Ok(task)
 }
 
 /// Carries the runtime's blocking wait across the release of the GIL.
@@ -123,11 +181,18 @@ fn run_node(
     let start: Start<Running> = Box::new(move |running| {
         Box::pin(async move {
             RUNNING.set(Some(running.clone()));
-            let tasks = Python::attach(|py| start.call0(py)?.extract::<Vec<Py<PyAny>>>(py));
+            let tasks = Python::attach(|py| {
+                let coroutines = start.call0(py)?.extract::<Vec<Py<PyAny>>>(py)?;
+                let tasks = coroutines.iter().map(|task| to_future(task.bind(py)));
+                tasks.collect::<PyResult<Vec<_>>>()
+            });
             match tasks {
                 Ok(tasks) => {
                     for task in tasks {
-                        running.node.spawn(run_task(running.clone(), task));
+                        let runner = running.clone();
+                        running.node.spawn(async move {
+                            run_task(runner, task).await;
+                        });
                     }
                 }
                 Err(error) => running.fail(error),
@@ -173,8 +238,10 @@ fn sleep(duration: &PyTime) -> PyResult<Awaitable> {
     }))
 }
 
-/// Add this module's functions to the Python module.
+/// Add this module's class and functions to the Python module.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Task>()?;
+    module.add_function(wrap_pyfunction!(spawn, module)?)?;
     module.add_function(wrap_pyfunction!(run_node, module)?)?;
     module.add_function(wrap_pyfunction!(now, module)?)?;
     module.add_function(wrap_pyfunction!(physical_now, module)?)?;

@@ -57,19 +57,12 @@ impl Awaitable {
 }
 
 /// A Python coroutine as a future: each poll resumes it with the outcome of what it awaits.
-pub(crate) struct Coroutine {
+struct Coroutine {
     coroutine: Py<PyAny>,
     awaiting: Option<(Py<Awaitable>, PyFuture)>,
 }
 
 impl Coroutine {
-    pub(crate) fn new(coroutine: Py<PyAny>) -> Self {
-        Self {
-            coroutine,
-            awaiting: None,
-        }
-    }
-
     /// Resume the coroutine and keep the future of what it awaits next; return its end, if any.
     fn resume(&mut self, py: Python<'_>) -> Option<Outcome> {
         let yielded = match self.coroutine.bind(py).call_method1("send", (py.None(),)) {
@@ -90,6 +83,21 @@ impl Coroutine {
         };
         self.awaiting = Some((awaitable.clone().unbind(), future));
         None
+    }
+}
+
+impl Drop for Coroutine {
+    /// Cancel a coroutine that has not finished: drop what it awaits, then close it.
+    fn drop(&mut self) {
+        Python::attach(|py| {
+            self.awaiting = None;
+            let coroutine = self.coroutine.bind(py);
+            if let Ok(close) = coroutine.getattr("close")
+                && let Err(error) = close.call0()
+            {
+                error.write_unraisable(py, Some(coroutine));
+            }
+        })
     }
 }
 
@@ -114,6 +122,24 @@ impl Future for Coroutine {
             }
         })
     }
+}
+
+/// Turn anything awaitable into a future of the node's runtime.
+pub(crate) fn to_future(awaitable: &Bound<'_, PyAny>) -> PyResult<PyFuture> {
+    let Ok(method) = awaitable.getattr("__await__") else {
+        let message = format!("{} is not awaitable", awaitable.repr()?);
+        return Err(PyTypeError::new_err(message));
+    };
+    let coroutine = method.call0()?;
+    let Ok(native) = coroutine.cast::<Awaitable>() else {
+        let coroutine = Coroutine {
+            coroutine: coroutine.unbind(),
+            awaiting: None,
+        };
+        return Ok(Box::pin(coroutine));
+    };
+    let future = native.borrow_mut().future.take();
+    future.ok_or_else(|| PyRuntimeError::new_err("a raio awaitable can be awaited only once"))
 }
 
 /// Add this module's classes to the Python module.

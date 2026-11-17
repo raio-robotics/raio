@@ -1,4 +1,5 @@
 mod awaitable;
+mod combine;
 mod coordinator;
 mod node;
 mod ports;
@@ -11,6 +12,7 @@ use pyo3::prelude::*;
 fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     time::register(module)?;
     awaitable::register(module)?;
+    combine::register(module)?;
     ports::register(module)?;
     node::register(module)?;
     coordinator::register(module)

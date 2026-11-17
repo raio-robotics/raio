@@ -1,6 +1,7 @@
 """raio: deterministic realtime nodes on async/await."""
 
 from ._py.app import connect, run
+from ._py.combinators import timeout
 from ._py.node import Node, task
 from ._py.ports import InputPort, OutputPort
 from ._rs.core import (
@@ -12,15 +13,20 @@ from ._rs.core import (
     US,
     Closed,
     S,
+    Task,
     Time,
+    gather,
     is_physical,
     now,
     physical_now,
+    select,
     sleep,
+    spawn,
 )
 
 __all__ = [
-    "Closed", "InputPort", "Node", "OutputPort", "Time",
+    "Closed", "InputPort", "Node", "OutputPort", "Task", "Time",
     "NS", "US", "MS", "S", "SECOND", "MINUTE", "HOUR",
-    "connect", "is_physical", "now", "physical_now", "run", "sleep", "task",
+    "connect", "gather", "is_physical", "now", "physical_now", "run", "select", "sleep",
+    "spawn", "task", "timeout",
 ]  # fmt: skip
