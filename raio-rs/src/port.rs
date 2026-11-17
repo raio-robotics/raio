@@ -1,14 +1,18 @@
 use crate::node::NodeContext;
 use crate::node::{EventSource, NodeId};
 use crate::time::Time;
+use std::any::Any;
 use std::cell::Cell;
 use std::cell::Ref;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::option::Option;
 use std::rc::Rc;
 use std::task::Poll;
 use std::task::Waker;
+
+use crate::node::EventDrain;
 
 use serde::{Deserialize, Serialize};
 
@@ -148,20 +152,50 @@ impl<T> InputPort<T> {
     }
 }
 
-pub(crate) type OutputCell<T> = Rc<RefCell<Option<T>>>;
+pub(crate) type OutputSender = Box<dyn Fn(Time, Time)>;
+
+pub struct OutputChannel<T> {
+    pub(crate) cell: RefCell<Option<T>>,
+    pub(crate) senders: RefCell<Vec<OutputSender>>,
+}
+
+impl<T> OutputChannel<T> {
+    fn new() -> Self {
+        Self {
+            cell: RefCell::new(None),
+            senders: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn install_sender(&self, sender: OutputSender) {
+        self.senders.borrow_mut().push(sender);
+    }
+}
+
+impl<T> EventDrain for OutputChannel<T> {
+    fn send(&self, timestamp: Time, ent: Time) {
+        for sender in self.senders.borrow().iter() {
+            sender(timestamp, ent);
+        }
+    }
+
+    fn close(&self) {
+        self.senders.borrow_mut().clear();
+    }
+}
 
 pub struct OutputPort<T> {
     pub(crate) id: PortId,
-    pub(crate) cell: OutputCell<T>,
+    pub(crate) channel: Rc<OutputChannel<T>>,
 }
 
 impl<T> OutputPort<T> {
     pub fn set(&self, value: T) {
-        *self.cell.borrow_mut() = Some(value);
+        *self.channel.cell.borrow_mut() = Some(value);
     }
 
     pub fn reset(&self) {
-        *self.cell.borrow_mut() = None;
+        *self.channel.cell.borrow_mut() = None;
     }
 }
 
@@ -169,6 +203,7 @@ pub struct Builder {
     node_id: NodeId,
     next_port_id: usize,
     context: Rc<NodeContext>,
+    pub(crate) ports: HashMap<PortId, Rc<dyn Any>>,
 }
 
 impl Builder {
@@ -177,6 +212,7 @@ impl Builder {
             node_id,
             next_port_id: 0,
             context,
+            ports: HashMap::new(),
         }
     }
 
@@ -185,20 +221,23 @@ impl Builder {
     }
 
     pub fn input<T: 'static>(&mut self) -> InputPort<T> {
+        let id = self.next_port_id();
         let channel = Rc::new(InputChannel::new(Time::ZERO));
-        self.context.register_source(channel.clone());
+        self.context.register_event_source(channel.clone());
+        self.ports.insert(id, channel.clone() as Rc<dyn Any>);
         InputPort {
-            id: self.next_port_id(),
+            id,
             channel,
             node_context: self.context.clone(),
         }
     }
 
-    pub fn output<T>(&mut self) -> OutputPort<T> {
-        OutputPort {
-            id: self.next_port_id(),
-            cell: Rc::new(RefCell::new(None)),
-        }
+    pub fn output<T: 'static>(&mut self) -> OutputPort<T> {
+        let id = self.next_port_id();
+        let channel = Rc::new(OutputChannel::new());
+        self.context.register_event_drain(channel.clone());
+        self.ports.insert(id, channel.clone() as Rc<dyn Any>);
+        OutputPort { id, channel }
     }
 
     fn next_port_id(&mut self) -> PortId {
@@ -266,6 +305,25 @@ mod tests {
         assert_eq!(ch.ent(), Time::FOREVER); // saturating +: delay can't wrap it
     }
 
+    #[test]
+    fn output_channel_fans_out_to_every_sender() {
+        let ch = OutputChannel::<i64>::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        for edge in [1, 2] {
+            let log = log.clone();
+            ch.install_sender(Box::new(move |timestamp, ent| {
+                log.borrow_mut().push((edge, timestamp, ent));
+            }));
+        }
+
+        ch.send(1 * S, 2 * S);
+        assert_eq!(*log.borrow(), vec![(1, 1 * S, 2 * S), (2, 1 * S, 2 * S)]);
+
+        ch.close();
+        ch.send(3 * S, 4 * S);
+        assert_eq!(log.borrow().len(), 2); // closed: senders dropped
+    }
+
     // --- integration: real futures over runtime + context + wait() ---
 
     use crate::runtime::Runtime;
@@ -285,7 +343,7 @@ mod tests {
 
         fn port(&self, port_id: usize) -> (InputPort<i64>, Rc<InputChannel<i64>>) {
             let channel = Rc::new(InputChannel::new(Time::ZERO));
-            self.ctx.register_source(channel.clone());
+            self.ctx.register_event_source(channel.clone());
             let port = InputPort {
                 id: PortId {
                     node_id: 0,

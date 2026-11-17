@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use crate::runtime::Runtime;
 use crate::time::Time;
+use std::cell::Cell;
 
 pub type NodeId = usize;
 
@@ -17,16 +18,25 @@ pub trait EventSource {
     fn wake_wakers(&self, time: Time);
 }
 
+pub trait EventDrain {
+    fn send(&self, timestamp: Time, ent: Time);
+    fn close(&self);
+}
+
 pub struct NodeContext {
     runtime: Rc<Runtime>,
-    sources: RefCell<Vec<Rc<dyn EventSource>>>,
+    event_sources: RefCell<Vec<Rc<dyn EventSource>>>,
+    event_drains: RefCell<Vec<Rc<dyn EventDrain>>>,
+    event_drained: Cell<bool>,
 }
 
 impl NodeContext {
     pub fn new(runtime: Rc<Runtime>) -> Self {
         Self {
             runtime,
-            sources: RefCell::new(Vec::new()),
+            event_sources: RefCell::new(Vec::new()),
+            event_drains: RefCell::new(Vec::new()),
+            event_drained: Cell::new(true),
         }
     }
 
@@ -36,19 +46,41 @@ impl NodeContext {
 
     /// It will process any events with timestamp <= time.
     pub fn advance_to(&self, time: Time) {
+        self.event_drained.set(false);
         self.runtime.advance_to(time);
-        for source in self.sources.borrow().iter() {
+        for source in self.event_sources.borrow().iter() {
             source.wake_wakers(time);
         }
     }
 
-    pub fn register_source(&self, source: Rc<dyn EventSource>) {
-        self.sources.borrow_mut().push(source);
+    pub fn register_event_source(&self, source: Rc<dyn EventSource>) {
+        self.event_sources.borrow_mut().push(source);
+    }
+
+    pub fn register_event_drain(&self, drain: Rc<dyn EventDrain>) {
+        self.event_drains.borrow_mut().push(drain);
+    }
+
+    pub fn send_events(&self, timestamp: Time, ent: Time) {
+        if self.event_drained.get() {
+            return;
+        }
+        for drain in self.event_drains.borrow().iter() {
+            drain.send(timestamp, ent);
+        }
+        self.event_drained.set(true);
+    }
+
+    pub(crate) fn close_event_drains(&self) {
+        for drain in self.event_drains.borrow().iter() {
+            drain.close();
+        }
+        self.event_drains.borrow_mut().clear();
     }
 
     /// Earliest Next Timestamp: the timestamp of the earliest next event that this node will produce.
     pub fn ent(&self) -> Time {
-        self.sources
+        self.event_sources
             .borrow()
             .iter()
             .map(|source| source.ent())
@@ -57,9 +89,11 @@ impl NodeContext {
     }
 
     pub fn try_advance(&self) {
-        // The earliest timestamp of all ready sources.
+        self.send_events(self.now(), self.ent());
+
+        // The earliest timestamp of all ready event_sources.
         let ready_target_time = self
-            .sources
+            .event_sources
             .borrow()
             .iter()
             .filter(|source| source.ready())
@@ -67,9 +101,9 @@ impl NodeContext {
             .min()
             .unwrap_or(Time::NEVER);
 
-        // The earliest timestamp of all unready sources.
+        // The earliest timestamp of all unready event_sources.
         let stat = self
-            .sources
+            .event_sources
             .borrow()
             .iter()
             .filter(|source| !source.ready())
@@ -114,19 +148,19 @@ mod tests {
     }
 
     #[test]
-    fn ent_is_the_min_over_all_sources() {
+    fn ent_is_the_min_over_all_event_sources() {
         let ctx = NodeContext::new(Rc::new(Runtime::new()));
         assert_eq!(ctx.ent(), Time::FOREVER);
-        ctx.register_source(FixedSource::new(5 * S, true));
-        ctx.register_source(FixedSource::new(2 * S, false)); // possibilities count too
+        ctx.register_event_source(FixedSource::new(5 * S, true));
+        ctx.register_event_source(FixedSource::new(2 * S, false)); // possibilities count too
         assert_eq!(ctx.ent(), 2 * S);
     }
 
     #[test]
     fn try_advance_delivers_the_earliest_consumable() {
         let ctx = NodeContext::new(Rc::new(Runtime::new()));
-        ctx.register_source(FixedSource::new(1 * S, true)); // hello's queued frame
-        ctx.register_source(FixedSource::new(2 * S, false)); // its piggybacked promise
+        ctx.register_event_source(FixedSource::new(1 * S, true)); // hello's queued frame
+        ctx.register_event_source(FixedSource::new(2 * S, false)); // its piggybacked promise
 
         ctx.try_advance();
         assert_eq!(ctx.now(), 1 * S); // 1s < promise 2s: delivered
@@ -135,9 +169,9 @@ mod tests {
     #[test]
     fn try_advance_blocks_on_an_equal_possibility() {
         let ctx = NodeContext::new(Rc::new(Runtime::new()));
-        ctx.register_source(FixedSource::new(2 * S, true)); // left's queued tick
+        ctx.register_event_source(FixedSource::new(2 * S, true)); // left's queued tick
         let announced = FixedSource::new(2 * S, false); // right announced ent=2s
-        ctx.register_source(announced.clone());
+        ctx.register_event_source(announced.clone());
 
         ctx.try_advance();
         assert_eq!(ctx.now(), Time::ZERO); // right's 2s value may be in flight
@@ -150,11 +184,59 @@ mod tests {
     #[test]
     fn closed_upstream_does_not_veto() {
         let ctx = NodeContext::new(Rc::new(Runtime::new()));
-        ctx.register_source(FixedSource::new(Time::FOREVER, false)); // closed, drained
-        ctx.register_source(FixedSource::new(3 * S, true)); // sibling's queued value
+        ctx.register_event_source(FixedSource::new(Time::FOREVER, false)); // closed, drained
+        ctx.register_event_source(FixedSource::new(3 * S, true)); // sibling's queued value
 
         ctx.try_advance();
         assert_eq!(ctx.now(), 3 * S); // FOREVER promise gates nothing
+    }
+
+    struct RecordingDrain {
+        sent: RefCell<Vec<(Time, Time)>>,
+        closed: Cell<bool>,
+    }
+    impl RecordingDrain {
+        fn new() -> Rc<Self> {
+            Rc::new(Self {
+                sent: RefCell::new(Vec::new()),
+                closed: Cell::new(false),
+            })
+        }
+    }
+    impl EventDrain for RecordingDrain {
+        fn send(&self, timestamp: Time, ent: Time) {
+            self.sent.borrow_mut().push((timestamp, ent));
+        }
+        fn close(&self) {
+            self.closed.set(true);
+        }
+    }
+
+    #[test]
+    fn send_events_fires_once_per_instant() {
+        let ctx = NodeContext::new(Rc::new(Runtime::new()));
+        let drain = RecordingDrain::new();
+        ctx.register_event_drain(drain.clone());
+        ctx.register_event_source(FixedSource::new(1 * S, true));
+
+        ctx.try_advance();
+        assert!(drain.sent.borrow().is_empty()); // nothing sent before the first advance
+        assert_eq!(ctx.now(), 1 * S);
+
+        ctx.try_advance();
+        assert_eq!(*drain.sent.borrow(), vec![(1 * S, 1 * S)]);
+
+        ctx.try_advance();
+        assert_eq!(drain.sent.borrow().len(), 1); // deduped until the next advance
+    }
+
+    #[test]
+    fn close_event_drains_closes_each_drain() {
+        let ctx = NodeContext::new(Rc::new(Runtime::new()));
+        let drain = RecordingDrain::new();
+        ctx.register_event_drain(drain.clone());
+        ctx.close_event_drains();
+        assert!(drain.closed.get());
     }
 
     #[test]
@@ -164,7 +246,7 @@ mod tests {
         assert_eq!(ctx.now(), Time::ZERO); // nothing consumable: no-op
 
         let source = FixedSource::new(5 * MS, true);
-        ctx.register_source(source.clone());
+        ctx.register_event_source(source.clone());
         ctx.advance_to(1 * S);
         ctx.try_advance();
         assert_eq!(ctx.now(), 1 * S); // stale head: fold territory, not delivery
