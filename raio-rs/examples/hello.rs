@@ -1,23 +1,29 @@
-use raio::app::{App, Builder, InputPort, OutputPort};
+use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::register;
+use raio::time::MS;
+use std::rc::Rc;
 
 struct Producer {
-    out: OutputPort<i64>,
+    node: Node,
+    out: OutputPort<String>,
 }
 
 impl Producer {
     fn new(builder: &mut Builder) -> Self {
         Self {
+            node: builder.node(),
             out: builder.output(),
         }
     }
 
-    async fn start(self) {
-        println!("producer: hello from pid {}", std::process::id());
+    async fn start(self: Rc<Self>) {
+        self.node.wait(1 * MS).await;
+        self.out.set("hello world".to_string());
     }
 }
 
 struct Sink {
-    input: InputPort<i64>,
+    input: InputPort<String>,
 }
 
 impl Sink {
@@ -27,15 +33,17 @@ impl Sink {
         }
     }
 
-    async fn start(self) {
-        println!("sink: hello from pid {}", std::process::id());
+    async fn start(self: Rc<Self>) {
+        while let Some((value, timestamp)) = self.input.wait().await {
+            println!("sink received {:?}", *value);
+        }
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let producer = app.create_node(Producer::new, Producer::start);
-    let sink = app.create_node(Sink::new, Sink::start);
+    let producer = app.create_node(Producer::new, register![Producer::start]);
+    let sink = app.create_node(Sink::new, register![Sink::start]);
     app.connect(&producer.out, &sink.input);
     app.run();
 }

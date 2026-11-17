@@ -18,8 +18,7 @@ fn run_example(name: &str) -> String {
 #[test]
 fn hello() {
     let stdout = run_example("hello");
-    assert!(stdout.contains("producer: hello from pid"));
-    assert!(stdout.contains("sink: hello from pid"));
+    assert_eq!(stdout, "sink received \"hello world\"\n");
 }
 
 #[test]
@@ -70,5 +69,21 @@ fn select() {
          1s: left 0 at 900ms, right 0 at 1s\n\
          1800ms: left 1 at 1800ms, right 0 at 1s\n\
          2s: left 1 at 1800ms, right 1 at 2s\n"
+    );
+}
+
+#[test]
+fn reaction() {
+    let stdout = run_example("reaction");
+    assert_eq!(
+        stdout,
+        "900ms: left 0 at 900ms, right none\n\
+         1s: left 0 at 900ms, right 0 at 1s\n\
+         1800ms: left 1 at 1800ms, right 0 at 1s\n\
+         2s: left 1 at 1800ms, right 1 at 2s\n\
+         2700ms: left 2 at 2700ms, right 1 at 2s\n\
+         3600ms: left 3 at 3600ms, right 1 at 2s\n\
+         4500ms: left 4 at 4500ms, right 1 at 2s\n\
+         5400ms: left 5 at 5400ms, right 1 at 2s\n"
     );
 }

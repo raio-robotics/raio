@@ -1,5 +1,7 @@
 use raio::app::{App, Builder, InputPort, Node, OutputPort};
+use raio::register;
 use raio::time::{S, Time};
+use std::rc::Rc;
 
 struct Ticker {
     node: Node,
@@ -14,7 +16,7 @@ impl Ticker {
         }
     }
 
-    async fn start(self, period: Time, ticks: i64) {
+    async fn start(self: Rc<Self>, period: Time, ticks: i64) {
         for i in 0..ticks {
             self.node.wait(period).await;
             self.out.set(i);
@@ -37,7 +39,7 @@ impl Synchronizer {
         }
     }
 
-    async fn start(self) {
+    async fn start(self: Rc<Self>) {
         while let Some((value, timestamp)) = self.left.wait().await {
             let Some(right) = self.right.get().map(|v| *v) else {
                 continue;
@@ -55,9 +57,15 @@ impl Synchronizer {
 
 fn main() {
     let mut app = App::new();
-    let fast = app.create_node(Ticker::new, |ticker| ticker.start(1 * S, 6));
-    let slow = app.create_node(Ticker::new, |ticker| ticker.start(1 * S, 3));
-    let sync = app.create_node(Synchronizer::new, Synchronizer::start);
+    let fast = app.create_node(
+        Ticker::new,
+        register![|ticker: Rc<Ticker>| ticker.start(1 * S, 6)],
+    );
+    let slow = app.create_node(
+        Ticker::new,
+        register![|ticker: Rc<Ticker>| ticker.start(1 * S, 3)],
+    );
+    let sync = app.create_node(Synchronizer::new, register![Synchronizer::start]);
     app.connect(&fast.out, &sync.left);
     app.connect(&slow.out, &sync.right);
     app.run();

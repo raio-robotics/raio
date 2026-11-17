@@ -1,5 +1,7 @@
 use raio::app::{App, Builder, Node};
+use raio::register;
 use raio::time::S;
+use std::rc::Rc;
 
 struct Ticker {
     node: Node,
@@ -12,7 +14,7 @@ impl Ticker {
         }
     }
 
-    async fn start(self) {
+    async fn start(self: Rc<Self>) {
         for i in 1..5 {
             let now = self.node.wait(1 * S).await;
             println!("tick {i} at {now}");
@@ -22,6 +24,6 @@ impl Ticker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Ticker::new, Ticker::start);
+    app.create_node(Ticker::new, register![Ticker::start]);
     app.run();
 }

@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 type Runner = Box<dyn FnOnce(Rc<Runtime>, Vec<Edge>, String)>;
+pub type Start<N> = Box<dyn FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>>>;
 pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 pub(crate) type ReceiverFactory = Box<dyn FnOnce(Box<dyn Fn(Vec<u8>)>) -> BoxFuture<()>>;
 pub(crate) type ListenerFactory = Box<dyn FnOnce() -> BoxFuture<(String, ReceiverFactory)>>;
@@ -141,16 +142,11 @@ impl App {
         });
     }
 
-    pub fn create_node<N, F, Fut>(
+    pub fn create_node<N: 'static>(
         &mut self,
         constructor: impl Fn(&mut Builder) -> N + 'static,
-        start: F,
-    ) -> N
-    where
-        N: 'static,
-        F: FnOnce(N) -> Fut + 'static,
-        Fut: std::future::Future<Output = ()> + 'static,
-    {
+        starts: Vec<Start<N>>,
+    ) -> N {
         let node_id: NodeId = self.nodes.len() as NodeId;
         let node_context = Rc::new(NodeContext::new(Rc::new(Runtime::new())));
         let mut builder = Builder::new(node_id, node_context);
@@ -160,20 +156,26 @@ impl App {
             .push(Box::new(move |runtime, edges, coordinator_endpoint| {
                 let node_context = Rc::new(NodeContext::new(runtime.clone()));
                 let mut builder = Builder::new(node_id, node_context.clone());
-                let node = constructor(&mut builder);
+                let node = Rc::new(constructor(&mut builder));
                 assert!(
                     builder.port_count() == ports,
                     "node {node_id}: constructor created a different number of ports \
                  than on its first run; constructors must be deterministic"
                 );
                 let ports = std::mem::take(&mut builder.ports);
+                let futures: Vec<_> = starts
+                    .into_iter()
+                    .map(|start| start(node.clone()))
+                    .collect();
                 runtime.block_on(run_node(
                     node_context,
                     node_id,
                     coordinator_endpoint,
                     edges,
                     ports,
-                    Box::pin(start(node)),
+                    Box::pin(async move {
+                        join_all(futures).await;
+                    }),
                 ));
             }));
         handle
@@ -318,4 +320,15 @@ async fn run_node(
     };
 
     futures::join!(main, join_all(send_futures), join_all(receive_futures));
+}
+
+#[macro_export]
+macro_rules! register {
+    ($($start:expr),+ $(,)?) => {
+        vec![$({
+            let start: $crate::app::Start<_> =
+                Box::new(move |node| Box::pin($start(node)));
+            start
+        }),+]
+    };
 }

@@ -161,6 +161,11 @@ impl<T> InputPort<T> {
     pub fn pin(&self) -> Pin<Box<impl Future<Output = Option<(Ref<'_, T>, Time)>>>> {
         Box::pin(self.wait())
     }
+
+    pub fn trigger(&self) -> Pin<Box<dyn Future<Output = bool> + '_>> {
+        let wait = self.wait();
+        Box::pin(async move { wait.await.is_some() })
+    }
 }
 
 pub(crate) type OutputSender = Box<dyn Fn(Time, Time)>;
