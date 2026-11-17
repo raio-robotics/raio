@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::option::Option;
 use std::rc::Rc;
+use std::task::Poll;
 use std::task::Waker;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -61,6 +62,7 @@ impl<T> InputChannel<T> {
 
     pub(crate) fn close(&self) {
         self.update_remote_ent(Time::FOREVER);
+        self.wake(Time::FOREVER); // waiters must learn that answer should be None
     }
 
     fn wake(&self, advance_to: Time) {
@@ -105,6 +107,7 @@ impl<T> EventSource for InputChannel<T> {
 pub struct InputPort<T> {
     pub(crate) id: PortId,
     pub(crate) channel: Rc<InputChannel<T>>,
+    pub(crate) node_context: Rc<NodeContext>,
 }
 
 impl<T> InputPort<T> {
@@ -115,6 +118,31 @@ impl<T> InputPort<T> {
 
     pub fn timestamp(&self) -> Time {
         self.channel.latest_timestamp.get()
+    }
+
+    pub async fn wait(&self) -> Option<Ref<'_, T>> {
+        let called_at = self.node_context.now();
+        assert!(
+            self.channel.latest_timestamp.get() <= called_at,
+            "latest timestamp is in the future"
+        );
+        std::future::poll_fn(|cx| {
+            if self.channel.latest_timestamp.get() > called_at {
+                return Poll::Ready(self.get());
+            };
+            if self.channel.queue.borrow().is_empty()
+                && self.channel.remote_ent.get() == Time::FOREVER
+            {
+                return Poll::Ready(None);
+            };
+            self.node_context.try_advance();
+            if self.channel.latest_timestamp.get() > called_at {
+                return Poll::Ready(self.get());
+            };
+            self.channel.register_waker(called_at, cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 }
 
@@ -160,6 +188,7 @@ impl Builder {
         InputPort {
             id: self.next_port_id(),
             channel,
+            node_context: self.context.clone(),
         }
     }
 
@@ -233,5 +262,162 @@ mod tests {
         let ch = channel();
         ch.close();
         assert_eq!(ch.ent(), Time::FOREVER); // saturating +: delay can't wrap it
+    }
+
+    // --- integration: real futures over runtime + context + wait() ---
+
+    use crate::runtime::Runtime;
+    use std::cell::Cell;
+
+    struct Rig {
+        runtime: Rc<Runtime>,
+        ctx: Rc<NodeContext>,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let runtime = Rc::new(Runtime::new());
+            let ctx = Rc::new(NodeContext::new(runtime.clone()));
+            Self { runtime, ctx }
+        }
+
+        fn port(&self, port_id: usize) -> (InputPort<i64>, Rc<InputChannel<i64>>) {
+            let channel = Rc::new(InputChannel::new(Time::ZERO));
+            self.ctx.register_source(channel.clone());
+            let port = InputPort {
+                id: PortId {
+                    node_id: 0,
+                    port_id,
+                },
+                channel: channel.clone(),
+                node_context: self.ctx.clone(),
+            };
+            (port, channel)
+        }
+
+        /// Let woken tasks run until everything is parked again.
+        fn settle(&self) {
+            self.runtime.block_on(async {});
+        }
+    }
+
+    #[test]
+    fn wait_delivers_after_arrival_and_ends_on_close() {
+        let rig = Rig::new();
+        let (port, channel) = rig.port(0);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let done = Rc::new(Cell::new(false));
+
+        let (out, fin) = (seen.clone(), done.clone());
+        rig.runtime.spawn(async move {
+            while let Some(value) = port.wait().await {
+                out.borrow_mut().push((*value, port.timestamp()));
+            }
+            fin.set(true);
+        });
+        rig.settle(); // parks: empty queue, upstream open
+        assert!(seen.borrow().is_empty());
+
+        // The receive-task contract: push + ENT + try_advance, one stretch.
+        channel.push(1 * S, 42);
+        channel.update_remote_ent(2 * S);
+        rig.ctx.try_advance();
+        rig.settle();
+        assert_eq!(*seen.borrow(), vec![(42, 1 * S)]);
+        assert_eq!(rig.ctx.now(), 1 * S);
+
+        channel.close();
+        rig.settle();
+        assert!(done.get()); // drained + FOREVER promise = None
+    }
+
+    #[test]
+    fn a_pending_promise_blocks_until_resolved() {
+        let rig = Rig::new();
+        let (left, left_ch) = rig.port(0);
+        let (_right, right_ch) = rig.port(1);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+
+        let out = seen.clone();
+        rig.runtime.spawn(async move {
+            if let Some(value) = left.wait().await {
+                out.borrow_mut().push(*value);
+            }
+        });
+        rig.settle();
+
+        // Left's tick is queued, but right has only announced ent=2s:
+        // its 2s value may still be in flight.
+        left_ch.push(2 * S, 1);
+        left_ch.update_remote_ent(4 * S);
+        right_ch.update_remote_ent(2 * S);
+        rig.ctx.try_advance();
+        rig.settle();
+        assert!(seen.borrow().is_empty()); // blocked: 2s == promise
+        assert_eq!(rig.ctx.now(), Time::ZERO);
+
+        // Right's ENT moves past 2s: left's tick is provably next.
+        right_ch.update_remote_ent(4 * S);
+        rig.ctx.try_advance();
+        rig.settle();
+        assert_eq!(*seen.borrow(), vec![1]);
+        assert_eq!(rig.ctx.now(), 2 * S);
+    }
+
+    #[test]
+    fn simultaneous_tags_settle_in_one_instant() {
+        let rig = Rig::new();
+        let (left, left_ch) = rig.port(0);
+        let (right, right_ch) = rig.port(1);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+
+        let out = seen.clone();
+        rig.runtime.spawn(async move {
+            if let Some(value) = left.wait().await {
+                // Same instant: the sibling's simultaneous value is a
+                // settled fact, readable without waiting.
+                let sibling = right.get().map(|v| *v);
+                out.borrow_mut().push((*value, sibling, right.timestamp()));
+            }
+        });
+        rig.settle();
+
+        left_ch.push(2 * S, 1);
+        left_ch.update_remote_ent(4 * S);
+        right_ch.push(2 * S, 7);
+        right_ch.update_remote_ent(4 * S);
+        rig.ctx.try_advance();
+        rig.settle();
+
+        // One advance latched both queued 2s values.
+        assert_eq!(*seen.borrow(), vec![(1, Some(7), 2 * S)]);
+        assert_eq!(rig.ctx.now(), 2 * S);
+    }
+
+    #[test]
+    fn wait_drains_a_closed_queue_before_ending() {
+        let rig = Rig::new();
+        let (port, channel) = rig.port(0);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let done = Rc::new(Cell::new(false));
+
+        let (out, fin) = (seen.clone(), done.clone());
+        rig.runtime.spawn(async move {
+            while let Some(value) = port.wait().await {
+                out.borrow_mut().push(*value);
+            }
+            fin.set(true);
+        });
+        rig.settle();
+
+        channel.push(1 * S, 1);
+        channel.push(2 * S, 2);
+        channel.close(); // FOREVER promise; two values still queued
+        rig.settle();
+
+        // wait's own try_advance cascades: 1s, then 2s, then None.
+        assert_eq!(*seen.borrow(), vec![1, 2]);
+        assert!(done.get());
+        assert_eq!(rig.ctx.now(), 2 * S);
     }
 }
