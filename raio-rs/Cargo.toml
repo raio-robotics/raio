@@ -7,7 +7,7 @@ repository.workspace = true
 description = "A deterministic realtime async runtime"
 readme = "../README.md"
 keywords = ["async", "runtime", "deterministic", "realtime", "asyncio"]
-categories = ["asynchronous", "concurrency", "simulation", "realtime"]
+categories = ["asynchronous", "concurrency", "simulation"]
 
 [lib]
 name = "raio"
