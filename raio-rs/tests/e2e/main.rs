@@ -1,11 +1,10 @@
-use raio::app::{Assignment, Builder, InputPort, create_node, run_node_as};
-use raio::coordinator::Coordinator;
-use raio::graph::{Connection, Graph, PortRef};
-use raio::register;
+use raio::app::{
+    Assignment, Builder, Connection, Graph, InputPort, PortId, create_node, run_node_as,
+};
+use raio::coordinator::{Coordinator, SERIALIZER, TRANSPORT};
 use raio::runtime::Runtime;
-use raio::serializer::bincode::BincodeSerializer;
+use raio::tasks;
 use raio::time::Time;
-use raio::transport::tcp::TcpTransport;
 use std::cell::RefCell;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -169,6 +168,12 @@ fn fanout() {
     );
 }
 
+#[test]
+fn serializer() {
+    let stdout = run_example("serializer");
+    assert_eq!(stdout, "sink received 42\n");
+}
+
 /// Collects what the `node` example sends.
 struct Collector {
     input: InputPort<String>,
@@ -188,26 +193,28 @@ type Launched = (Result<(), String>, Output, std::thread::Result<Vec<String>>);
 
 /// Run the `node` example and an in-process collector, connected at the collector's `input` port.
 fn launch(input: usize) -> Launched {
+    let (from, to) = (
+        PortId {
+            node_id: 0,
+            port_id: 0,
+        },
+        PortId {
+            node_id: 1,
+            port_id: input,
+        },
+    );
     let graph = Graph {
         nodes: 2,
         connections: vec![Connection {
-            from: PortRef {
-                node_id: 0,
-                port: 0,
-            },
-            to: PortRef {
-                node_id: 1,
-                port: input,
-            },
+            from,
+            to,
             delay: Time::ZERO,
-            serializer: "bincode".to_string(),
-            transport: "tcp".to_string(),
         }],
     };
     let (announce, announced) = std::sync::mpsc::channel();
     let coordinator = std::thread::spawn(move || {
         Runtime::new().block_on(async move {
-            let coordinator = Coordinator::new(TcpTransport, BincodeSerializer).await;
+            let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             announce.send(coordinator.endpoint().to_string()).unwrap();
             coordinator.run(graph).await
         })
@@ -241,7 +248,7 @@ fn launch(input: usize) -> Launched {
         };
         run_node_as(
             assignment,
-            create_node(constructor, register![Collector::start]),
+            create_node(constructor, tasks![Collector::start]),
         );
         received.take()
     });
@@ -263,7 +270,7 @@ fn a_node_in_its_own_program_is_wired_by_port_position() {
 #[test]
 fn a_graph_that_names_a_missing_port_stops_every_node() {
     let (wired, example, collected) = launch(3);
-    let refusal = "node 1 has no input port 3; its input ports are [0]";
+    let refusal = "node 1 has no input port 3";
     assert_eq!(wired, Err(refusal.to_string()));
     assert!(!example.status.success());
     assert!(String::from_utf8(example.stderr).unwrap().contains(refusal));

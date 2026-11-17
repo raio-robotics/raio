@@ -5,7 +5,7 @@ use std::sync::{Arc, Weak};
 
 use futures::channel::mpsc::UnboundedSender;
 
-use crate::port::InputPort;
+use crate::app::InputPort;
 use crate::time::Time;
 
 /// Receives values from other threads as physical events.
@@ -83,8 +83,8 @@ impl<T> ActionHandle<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Builder;
     use crate::node::NodeScheduler;
-    use crate::port::Builder;
     use crate::runtime::Runtime;
     use std::rc::Rc;
 

@@ -1,5 +1,5 @@
 use raio::app::{Action, App, Builder, InputPort, Node, OutputPort};
-use raio::register;
+use raio::tasks;
 use std::io::{self, IsTerminal, Read};
 use std::process::Command;
 use std::rc::Rc;
@@ -73,8 +73,8 @@ impl Echo {
 
 fn main() {
     let mut app = App::new();
-    let keyboard = app.create_node(KeyboardInput::new, register![KeyboardInput::start]);
-    let echo = app.create_node(Echo::new, register![Echo::start]);
+    let keyboard = app.create_node(KeyboardInput::new, tasks![KeyboardInput::start]);
+    let echo = app.create_node(Echo::new, tasks![Echo::start]);
     app.connect(&keyboard.out, &echo.input);
     app.run();
 }

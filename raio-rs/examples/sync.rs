@@ -1,5 +1,5 @@
 use raio::app::{App, Builder, InputPort, Node, OutputPort};
-use raio::register;
+use raio::tasks;
 use raio::time::{S, Time};
 use std::rc::Rc;
 
@@ -59,13 +59,13 @@ fn main() {
     let mut app = App::new();
     let fast = app.create_node(
         Ticker::new,
-        register![|ticker: Rc<Ticker>| ticker.start(1 * S, 6)],
+        tasks![|ticker: Rc<Ticker>| ticker.start(1 * S, 6)],
     );
     let slow = app.create_node(
         Ticker::new,
-        register![|ticker: Rc<Ticker>| ticker.start(1 * S, 3)],
+        tasks![|ticker: Rc<Ticker>| ticker.start(1 * S, 3)],
     );
-    let sync = app.create_node(Synchronizer::new, register![Synchronizer::start]);
+    let sync = app.create_node(Synchronizer::new, tasks![Synchronizer::start]);
     app.connect(&fast.out, &sync.left);
     app.connect(&slow.out, &sync.right);
     app.run();

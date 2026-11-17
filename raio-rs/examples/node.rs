@@ -1,5 +1,5 @@
 use raio::app::{Builder, Node, OutputPort, create_node, run_node};
-use raio::register;
+use raio::tasks;
 use raio::time::MS;
 use std::rc::Rc;
 
@@ -29,7 +29,7 @@ fn main() {
     let text = std::env::args().nth(1).expect("usage: node <text>");
     let producer = create_node(
         |builder| Producer::new(builder, text),
-        register![Producer::start],
+        tasks![Producer::start],
     );
     run_node(producer);
 }

@@ -6,47 +6,46 @@ use std::collections::HashMap;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterNode {
     pub node_id: usize,
-    pub ports: Vec<PortInfo>,
+    pub inputs: Vec<InputInfo>,
+    pub outputs: Vec<OutputInfo>,
 }
 
-/// A port as its node describes it to the coordinator.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PortInfo {
+/// An input as its node describes it; an input uses one serializer and one transport.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct InputInfo {
+    /// The port's position among the ports its node built.
+    pub id: usize,
+    pub serializer: String,
+    pub transport: String,
+    /// The address the input listens on.
+    pub endpoint: String,
+}
+
+/// An output as its node describes it, with every serializer and transport it has.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct OutputInfo {
     /// The port's position among the ports its node built.
     pub id: usize,
     pub serializers: Vec<String>,
     pub transports: Vec<String>,
-    /// The address an input listens on with each of its transports; `None` for an output.
-    pub endpoints: Option<HashMap<String, String>>,
 }
 
-/// The connection that feeds an input.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct Upstream {
-    pub delay: Time,
-    pub serializer: String,
-    pub transport: String,
-}
-
-/// One connection that an output feeds.
+/// One connection that an output feeds: the input it reaches and the delay it adds.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Downstream {
-    pub endpoint: String,
-    pub serializer: String,
-    pub transport: String,
+    pub input: InputInfo,
+    pub delay: Time,
 }
 
-/// The connections of one node's ports, keyed by port id.
-#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
-pub struct Wiring {
-    pub upstream: HashMap<usize, Upstream>,
-    pub downstream: HashMap<usize, Vec<Downstream>>,
-}
+/// The connections that each output of one node feeds, keyed by port id.
+pub type Wiring = HashMap<usize, Vec<Downstream>>;
 
 /// A node's wiring, or the reason the coordinator refused the graph.
 pub type Reply = Result<Wiring, String>;
 
-/// An edge's output for one tag, including its ENT promise and optional serialized value.
+/// A connection's output for one tag, including its ENT promise and optional serialized value.
+///
+/// The sender adds the connection's delay, so both times are the receiver's.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Frame {
     pub timestamp: Time,

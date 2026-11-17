@@ -1,5 +1,5 @@
 use raio::app::{App, Builder, InputPort, Node, OutputPort};
-use raio::register;
+use raio::tasks;
 use raio::time::MS;
 use std::rc::Rc;
 
@@ -42,8 +42,8 @@ impl Sink {
 
 fn main() {
     let mut app = App::new();
-    let producer = app.create_node(Producer::new, register![Producer::start]);
-    let sink = app.create_node(Sink::new, register![Sink::start]);
+    let producer = app.create_node(Producer::new, tasks![Producer::start]);
+    let sink = app.create_node(Sink::new, tasks![Sink::start]);
     app.connect(&producer.out, &sink.input);
     app.run();
 }

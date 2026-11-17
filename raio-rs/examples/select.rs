@@ -1,6 +1,6 @@
 use futures::future::{Either, select};
 use raio::app::{App, Builder, InputPort, Node, OutputPort};
-use raio::register;
+use raio::tasks;
 use raio::time::{MS, S, Time};
 use std::rc::Rc;
 
@@ -73,13 +73,13 @@ fn main() {
     let mut app = App::new();
     let fast = app.create_node(
         Ticker::new,
-        register![|ticker: Rc<Ticker>| ticker.start(900 * MS, 6)],
+        tasks![|ticker: Rc<Ticker>| ticker.start(900 * MS, 6)],
     );
     let slow = app.create_node(
         Ticker::new,
-        register![|ticker: Rc<Ticker>| ticker.start(1 * S, 2)],
+        tasks![|ticker: Rc<Ticker>| ticker.start(1 * S, 2)],
     );
-    let merge = app.create_node(Merge::new, register![Merge::start]);
+    let merge = app.create_node(Merge::new, tasks![Merge::start]);
     app.connect(&fast.out, &merge.left);
     app.connect(&slow.out, &merge.right);
     app.run();

@@ -1,5 +1,5 @@
 use raio::app::{App, Builder, InputPort, Node, OutputPort};
-use raio::register;
+use raio::tasks;
 use raio::time::{MS, S, Time};
 use std::rc::Rc;
 
@@ -74,10 +74,10 @@ fn main() {
     let mut app = App::new();
     let ticker = app.create_node(
         Ticker::new,
-        register![|ticker: Rc<Ticker>| ticker.start(1 * S, 2)],
+        tasks![|ticker: Rc<Ticker>| ticker.start(1 * S, 2)],
     );
-    let worker = app.create_node(Worker::new, register![Worker::consume, Worker::produce]);
-    let sink = app.create_node(Sink::new, register![Sink::start]);
+    let worker = app.create_node(Worker::new, tasks![Worker::consume, Worker::produce]);
+    let sink = app.create_node(Sink::new, tasks![Sink::start]);
     app.connect(&ticker.out, &worker.input);
     app.connect(&worker.out, &sink.input);
     app.run();

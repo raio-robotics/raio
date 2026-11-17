@@ -1,5 +1,5 @@
 use raio::app::{App, Builder, Node};
-use raio::register;
+use raio::tasks;
 use raio::time::S;
 use std::rc::Rc;
 
@@ -24,6 +24,6 @@ impl Ticker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Ticker::new, register![Ticker::start]);
+    app.create_node(Ticker::new, tasks![Ticker::start]);
     app.run();
 }

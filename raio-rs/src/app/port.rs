@@ -1,126 +1,57 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::task::{Poll, Waker};
 
-use futures::StreamExt;
-use futures::channel::mpsc::unbounded;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-
-use crate::action::{Action, Handles};
-use crate::app::{InputEnd, OutputEnd};
-use crate::messages::PortInfo;
-use crate::node::{EventSink, EventSource, ExecutionMode, Node, NodeId, NodeScheduler};
-use crate::runtime::{BoxFuture, Runtime, TaskId, WakeKind};
+use super::setting::PortSetting;
+use crate::node::{EventSink, EventSource, NodeId, NodeScheduler};
+use crate::runtime::{Runtime, TaskId, WakeKind};
 use crate::serializer::Serializer;
-use crate::serializer::bincode::BincodeSerializer;
 use crate::time::Time;
-use crate::transport::tcp::TcpTransport;
-use crate::transport::{AnyTransport, Transport};
+use crate::transport::Transport;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+/// A port of a node, by its position among the ports the node built.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PortId {
     pub node_id: NodeId,
     pub port_id: usize,
 }
 
-/// A port's position in its node and the serializers and transports it can use.
-pub(crate) struct PortSpec<T> {
-    id: usize,
-    serializers: RefCell<Vec<Rc<dyn Serializer<T>>>>,
-    transports: RefCell<Vec<Rc<dyn AnyTransport>>>,
-}
-
-impl<T: Serialize + DeserializeOwned + 'static> PortSpec<T> {
-    /// Create the spec of the port at this position, using bincode over TCP.
-    fn new(id: usize) -> Self {
-        Self {
-            id,
-            serializers: RefCell::new(vec![Rc::new(BincodeSerializer)]),
-            transports: RefCell::new(vec![Rc::new(TcpTransport)]),
-        }
+impl fmt::Display for PortId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "port {} of node {}", self.port_id, self.node_id)
     }
 }
-
-impl<T> PortSpec<T> {
-    /// Create the spec of a channel that never connects to another node.
-    fn local() -> Self {
-        Self {
-            id: 0,
-            serializers: RefCell::new(Vec::new()),
-            transports: RefCell::new(Vec::new()),
-        }
-    }
-
-    /// Describe the port for registration, without its addresses.
-    pub(crate) fn describe(&self) -> PortInfo {
-        let serializers = self.serializers.borrow();
-        let transports = self.transports.borrow();
-        PortInfo {
-            id: self.id,
-            serializers: serializers.iter().map(|s| s.name().to_string()).collect(),
-            transports: transports.iter().map(|t| t.name().to_string()).collect(),
-            endpoints: None,
-        }
-    }
-
-    /// Return the serializer with this name; the port must have it.
-    pub(crate) fn serializer(&self, name: &str) -> Rc<dyn Serializer<T>> {
-        let serializers = self.serializers.borrow();
-        let found = serializers.iter().find(|s| s.name() == name).cloned();
-        found.unwrap_or_else(|| panic!("port {} has no serializer named {name:?}", self.id))
-    }
-
-    pub(crate) fn transports(&self) -> Vec<Rc<dyn AnyTransport>> {
-        self.transports.borrow().clone()
-    }
-
-    /// Return the transport with this name; the port must have it.
-    pub(crate) fn transport(&self, name: &str) -> Rc<dyn AnyTransport> {
-        let found = self.transports().into_iter().find(|t| t.name() == name);
-        found.unwrap_or_else(|| panic!("port {} has no transport named {name:?}", self.id))
-    }
-
-    fn set_serializer(&self, serializer: impl Serializer<T> + 'static) {
-        *self.serializers.borrow_mut() = vec![Rc::new(serializer)];
-    }
-
-    fn set_transport(&self, transport: impl Transport + 'static) {
-        *self.transports.borrow_mut() = vec![Rc::new(transport)];
-    }
-}
-
-pub(crate) type InputQueue<T> = RefCell<BTreeMap<Time, (T, bool)>>;
 
 /// Buffers incoming values until the scheduler delivers their tags.
 pub(crate) struct InputChannel<T> {
-    queue: InputQueue<T>,
+    /// The values still to deliver, by tag; the flag marks a physical value.
+    queue: RefCell<BTreeMap<Time, (T, bool)>>,
     /// The last delivered value and its tag.
     latest: RefCell<Option<(Time, T)>>,
     /// Each waiting task has a Resume waker for values and a Physical waker for closure.
     waiters: RefCell<HashMap<TaskId, (Waker, Waker)>>,
     remote_ent: Cell<Time>,
     closed: Cell<bool>,
-    pub(crate) spec: PortSpec<T>,
+    pub(crate) setting: PortSetting<T>,
 }
 
 impl<T> InputChannel<T> {
     pub fn new() -> Self {
-        Self::with_spec(PortSpec::local())
+        Self::with_setting(PortSetting::local())
     }
 
-    fn with_spec(spec: PortSpec<T>) -> Self {
+    pub(crate) fn with_setting(setting: PortSetting<T>) -> Self {
         Self {
             queue: RefCell::new(BTreeMap::new()),
             latest: RefCell::new(None),
             waiters: RefCell::new(HashMap::new()),
             remote_ent: Cell::new(Time::ZERO),
             closed: Cell::new(false),
-            spec,
+            setting,
         }
     }
 
@@ -226,7 +157,6 @@ impl<T> EventSource for InputChannel<T> {
 
 /// Lets user tasks read or await values delivered by an input channel.
 pub struct InputPort<T> {
-    pub(crate) id: PortId,
     pub(crate) channel: Rc<InputChannel<T>>,
     pub(crate) scheduler: Rc<NodeScheduler>,
 }
@@ -234,12 +164,16 @@ pub struct InputPort<T> {
 impl<T> InputPort<T> {
     /// Use this serializer in place of the port's default.
     pub fn set_serializer(&self, serializer: impl Serializer<T> + 'static) {
-        self.channel.spec.set_serializer(serializer);
+        let name = serializer.name().to_string();
+        let serializers = &self.channel.setting.serializers;
+        serializers.set(name, Rc::new(serializer));
     }
 
     /// Use this transport in place of the port's default.
     pub fn set_transport(&self, transport: impl Transport + 'static) {
-        self.channel.spec.set_transport(transport);
+        let name = transport.name().to_string();
+        let transports = &self.channel.setting.transports;
+        transports.set(name, Rc::new(transport));
     }
 
     /// The value delivered at the current tag, if any.
@@ -274,7 +208,7 @@ impl<T> InputPort<T> {
             if self.channel.latest_timestamp() > called_at {
                 return Poll::Ready(self.latest());
             };
-            if self.channel.queue.borrow().is_empty() && self.channel.closed.get() {
+            if self.closed() {
                 return Poll::Ready(None);
             };
             self.channel.waiters.borrow_mut().insert(
@@ -302,18 +236,18 @@ impl<T> InputPort<T> {
 pub(crate) type OutputSender<T> = Box<dyn Fn(Time, Time, bool, Option<&T>)>;
 
 /// Holds the current tag's output value and the callbacks that transmit its frame.
-pub struct OutputChannel<T> {
+pub(crate) struct OutputChannel<T> {
     pub(crate) cell: RefCell<Option<T>>,
     pub(crate) senders: RefCell<Vec<OutputSender<T>>>,
-    pub(crate) spec: PortSpec<T>,
+    pub(crate) setting: PortSetting<T>,
 }
 
 impl<T> OutputChannel<T> {
-    fn new(spec: PortSpec<T>) -> Self {
+    pub(crate) fn new(setting: PortSetting<T>) -> Self {
         Self {
             cell: RefCell::new(None),
             senders: RefCell::new(Vec::new()),
-            spec,
+            setting,
         }
     }
 }
@@ -334,7 +268,6 @@ impl<T> EventSink for OutputChannel<T> {
 
 /// Lets user tasks set the value sent when the current tag completes.
 pub struct OutputPort<T> {
-    pub(crate) id: PortId,
     pub(crate) channel: Rc<OutputChannel<T>>,
     pub(crate) scheduler: Rc<NodeScheduler>,
 }
@@ -342,12 +275,16 @@ pub struct OutputPort<T> {
 impl<T> OutputPort<T> {
     /// Use this serializer in place of the port's default.
     pub fn set_serializer(&self, serializer: impl Serializer<T> + 'static) {
-        self.channel.spec.set_serializer(serializer);
+        let name = serializer.name().to_string();
+        let serializers = &self.channel.setting.serializers;
+        serializers.set(name, Rc::new(serializer));
     }
 
     /// Use this transport in place of the port's default.
     pub fn set_transport(&self, transport: impl Transport + 'static) {
-        self.channel.spec.set_transport(transport);
+        let name = transport.name().to_string();
+        let transports = &self.channel.setting.transports;
+        transports.set(name, Rc::new(transport));
     }
 
     pub fn set(&self, value: T) {
@@ -364,102 +301,25 @@ impl<T> OutputPort<T> {
     }
 }
 
-/// Creates a node's ports, actions, and clock handles using one shared scheduler.
-pub struct Builder {
-    node_id: NodeId,
-    next_port_id: usize,
-    scheduler: Rc<NodeScheduler>,
-    /// Each input port needs exactly one upstream connection.
-    pub(crate) inputs: Vec<Rc<dyn InputEnd>>,
-    pub(crate) outputs: Vec<Rc<dyn OutputEnd>>,
-    /// Internal tasks that forward action values into input channels.
-    pub(crate) tasks: Vec<BoxFuture<()>>,
-}
-
-impl Builder {
-    pub(crate) fn new(node_id: NodeId, scheduler: Rc<NodeScheduler>) -> Self {
-        Self {
-            node_id,
-            next_port_id: 0,
-            scheduler,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            tasks: Vec::new(),
-        }
-    }
-
-    pub fn input<T: Serialize + DeserializeOwned + 'static>(&mut self) -> InputPort<T> {
-        let id = self.next_port_id();
-        let channel = Rc::new(InputChannel::with_spec(PortSpec::new(id.port_id)));
-        self.scheduler.add_source(channel.clone());
-        self.inputs.push(channel.clone());
-        InputPort {
-            id,
-            channel,
-            scheduler: self.scheduler.clone(),
-        }
-    }
-
-    pub fn action<T: Send + 'static>(&mut self) -> Action<T> {
-        let id = self.next_port_id();
+#[cfg(test)]
+impl InputPort<i64> {
+    /// Create an input that a test feeds through the returned channel.
+    pub(crate) fn local(scheduler: &Rc<NodeScheduler>) -> (Self, Rc<InputChannel<i64>>) {
         let channel = Rc::new(InputChannel::new());
-        // Action values are physical, so they do not limit ENT.
-        channel.update_remote_ent(Time::FOREVER);
-        self.scheduler.add_source(channel.clone());
-        let (sender, mut receiver) = unbounded::<T>();
-        let (action_channel, scheduler) = (channel.clone(), self.scheduler.clone());
-        self.tasks.push(Box::pin(async move {
-            while let Some(value) = receiver.next().await {
-                action_channel.push_physical(scheduler.mint_physical_tag(), value);
-            }
-            action_channel.close(); // Dropping the last producer handle closes the action.
-        }));
-        Action {
-            port: InputPort {
-                id,
-                channel,
-                scheduler: self.scheduler.clone(),
-            },
-            handles: RefCell::new(Handles::Unused(Arc::new(sender))),
-        }
-    }
-
-    /// Select `Realtime` (the default) or `FastForward` pacing for this node.
-    pub fn execution_mode(&mut self, execution_mode: ExecutionMode) {
-        self.scheduler.set_execution_mode(execution_mode);
-    }
-
-    pub fn node(&mut self) -> Node {
-        Node {
-            scheduler: self.scheduler.clone(),
-        }
-    }
-
-    pub fn output<T: Serialize + DeserializeOwned + 'static>(&mut self) -> OutputPort<T> {
-        let id = self.next_port_id();
-        let channel = Rc::new(OutputChannel::new(PortSpec::new(id.port_id)));
-        self.scheduler.add_sink(channel.clone());
-        self.outputs.push(channel.clone());
-        OutputPort {
-            id,
-            channel,
-            scheduler: self.scheduler.clone(),
-        }
-    }
-
-    fn next_port_id(&mut self) -> PortId {
-        let id = PortId {
-            node_id: self.node_id,
-            port_id: self.next_port_id,
+        scheduler.add_source(channel.clone());
+        let port = InputPort {
+            channel: channel.clone(),
+            scheduler: scheduler.clone(),
         };
-        self.next_port_id += 1;
-        id
+        (port, channel)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Builder;
+    use crate::node::ExecutionMode;
     use crate::serializer::tests::Decimal;
     use crate::time::S;
     use crate::transport::tests::Loopback;
@@ -597,7 +457,7 @@ mod tests {
         let mut builder = Builder::new(0, scheduler);
         let _first: InputPort<i64> = builder.input();
         let out: OutputPort<i64> = builder.output();
-        let described = out.channel.spec.describe();
+        let described = out.channel.setting.describe();
         // A port is known by its position among the ports its node built.
         assert_eq!(described.id, 1);
         assert_eq!(described.serializers, ["bincode"]);
@@ -605,14 +465,14 @@ mod tests {
 
         out.set_serializer(Decimal);
         out.set_transport(Loopback);
-        let described = out.channel.spec.describe();
+        let described = out.channel.setting.describe();
         assert_eq!(described.serializers, [Decimal.name()]);
         assert_eq!(described.transports, [Transport::name(&Loopback)]);
     }
 
     #[test]
     fn output_channel_fans_out_to_every_sender() {
-        let ch = OutputChannel::<i64>::new(PortSpec::local());
+        let ch = OutputChannel::<i64>::new(PortSetting::local());
         let log = Rc::new(RefCell::new(Vec::new()));
         for edge in [1, 2] {
             let log = log.clone();
@@ -668,18 +528,8 @@ mod tests {
             Self { scheduler }
         }
 
-        fn port(&self, port_id: usize) -> (InputPort<i64>, Rc<InputChannel<i64>>) {
-            let channel = Rc::new(InputChannel::new());
-            self.scheduler.add_source(channel.clone());
-            let port = InputPort {
-                id: PortId {
-                    node_id: 0,
-                    port_id,
-                },
-                channel: channel.clone(),
-                scheduler: self.scheduler.clone(),
-            };
-            (port, channel)
+        fn port(&self) -> (InputPort<i64>, Rc<InputChannel<i64>>) {
+            InputPort::local(&self.scheduler)
         }
 
         /// Run tasks and advance tags until no immediate work remains.
@@ -691,7 +541,7 @@ mod tests {
     #[test]
     fn wait_delivers_after_arrival_and_ends_on_close() {
         let rig = Rig::new();
-        let (port, channel) = rig.port(0);
+        let (port, channel) = rig.port();
         let seen = Rc::new(RefCell::new(Vec::new()));
         let done = Rc::new(Cell::new(false));
 
@@ -721,8 +571,8 @@ mod tests {
     #[test]
     fn a_pending_promise_blocks_until_resolved() {
         let rig = Rig::new();
-        let (left, left_ch) = rig.port(0);
-        let (_right, right_ch) = rig.port(1);
+        let (left, left_ch) = rig.port();
+        let (_right, right_ch) = rig.port();
         let seen = Rc::new(RefCell::new(Vec::new()));
 
         let out = seen.clone();
@@ -753,8 +603,8 @@ mod tests {
     #[test]
     fn simultaneous_tags_settle_in_one_instant() {
         let rig = Rig::new();
-        let (left, left_ch) = rig.port(0);
-        let (right, right_ch) = rig.port(1);
+        let (left, left_ch) = rig.port();
+        let (right, right_ch) = rig.port();
         let seen = Rc::new(RefCell::new(Vec::new()));
 
         let out = seen.clone();
@@ -782,8 +632,8 @@ mod tests {
     #[test]
     fn wait_resolves_via_latest_even_after_further_advances() {
         let rig = Rig::new();
-        let (right, right_ch) = rig.port(0);
-        let (_left, left_ch) = rig.port(1);
+        let (right, right_ch) = rig.port();
+        let (_left, left_ch) = rig.port();
         let seen = Rc::new(RefCell::new(Vec::new()));
 
         let out = seen.clone();
@@ -809,7 +659,7 @@ mod tests {
     #[test]
     fn wait_baseline_is_at_call_not_first_poll() {
         let rig = Rig::new();
-        let (port, channel) = rig.port(0);
+        let (port, channel) = rig.port();
         let scheduler = rig.scheduler.clone();
         let seen = Rc::new(RefCell::new(None));
 
@@ -830,7 +680,7 @@ mod tests {
     #[test]
     fn wait_drains_a_closed_queue_before_ending() {
         let rig = Rig::new();
-        let (port, channel) = rig.port(0);
+        let (port, channel) = rig.port();
         let seen = Rc::new(RefCell::new(Vec::new()));
         let done = Rc::new(Cell::new(false));
 
@@ -857,7 +707,7 @@ mod tests {
     #[test]
     fn an_input_is_closed_once_its_queue_has_drained() {
         let rig = Rig::new();
-        let (port, channel) = rig.port(0);
+        let (port, channel) = rig.port();
         channel.push(1 * S, 1);
         channel.close();
         assert!(!port.closed()); // The queued value is still to come.
@@ -868,7 +718,7 @@ mod tests {
     #[test]
     fn a_close_resumes_the_waiter_at_a_physical_tag() {
         let rig = Rig::new();
-        let (port, channel) = rig.port(0);
+        let (port, channel) = rig.port();
         let seen = Rc::new(Cell::new(None));
 
         let (out, scheduler) = (seen.clone(), rig.scheduler.clone());
@@ -888,7 +738,7 @@ mod tests {
     #[test]
     fn a_forever_promise_is_not_a_close() {
         let rig = Rig::new();
-        let (port, channel) = rig.port(0);
+        let (port, channel) = rig.port();
         let done = Rc::new(Cell::new(false));
 
         // An ENT of FOREVER rules out logical values but does not close the input.
@@ -909,7 +759,7 @@ mod tests {
     #[test]
     fn a_physical_value_marks_its_tag_and_only_its_tag() {
         let rig = Rig::new();
-        let (_port, channel) = rig.port(0);
+        let (_port, channel) = rig.port();
 
         channel.push_physical(3 * S, 7);
         channel.update_remote_ent(4 * S);

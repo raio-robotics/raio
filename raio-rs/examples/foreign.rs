@@ -1,5 +1,5 @@
 use raio::app::{App, Builder, Node};
-use raio::register;
+use raio::tasks;
 use raio::time::S;
 use std::rc::Rc;
 use std::time::Duration;
@@ -31,6 +31,6 @@ impl Worker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Worker::new, register![Worker::start]);
+    app.create_node(Worker::new, tasks![Worker::start]);
     app.run();
 }
