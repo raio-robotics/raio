@@ -1,12 +1,17 @@
+mod awaitable;
+mod coordinator;
+mod node;
+mod ports;
+mod time;
+
 use pyo3::prelude::*;
 
-#[pyfunction]
-fn add(left: u64, right: u64) -> u64 {
-    raio::add(left, right)
-}
-
-#[pymodule(name = "raio")]
-fn raio_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(add, m)?)?;
-    Ok(())
+/// The part of raio that runs on raio-rs: a node's runtime, its ports and its clock.
+#[pymodule]
+fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    time::register(module)?;
+    awaitable::register(module)?;
+    ports::register(module)?;
+    node::register(module)?;
+    coordinator::register(module)
 }

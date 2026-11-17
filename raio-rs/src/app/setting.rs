@@ -1,13 +1,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-
 use super::port::PortId;
 use crate::messages::OutputInfo;
-use crate::serializer::Serializer;
-use crate::serializer::bincode::BincodeSerializer;
+use crate::serializer::{Payload, Serializer};
 use crate::transport::AnyTransport;
 use crate::transport::tcp::TcpTransport;
 
@@ -56,16 +52,17 @@ pub(crate) struct PortSetting<T> {
     pub(crate) transports: PortOptions<dyn AnyTransport>,
 }
 
-impl<T: Serialize + DeserializeOwned + 'static> PortSetting<T> {
-    /// Create the setting of a port that uses bincode over TCP.
+impl<T: Payload> PortSetting<T> {
+    /// Create the setting of a port that uses its payload's default serializer over TCP.
     pub(crate) fn new(id: PortId) -> Self {
         let setting = Self {
             id,
             ..Self::local()
         };
-        let bincode: Rc<dyn Serializer<T>> = Rc::new(BincodeSerializer);
+        let serializer = T::default_serializer();
         let tcp: Rc<dyn AnyTransport> = Rc::new(TcpTransport);
-        setting.serializers.set(bincode.name().to_string(), bincode);
+        let name = serializer.name().to_string();
+        setting.serializers.set(name, serializer);
         setting.transports.set(tcp.name().to_string(), tcp);
         setting
     }

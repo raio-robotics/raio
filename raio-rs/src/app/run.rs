@@ -6,19 +6,20 @@ use std::rc::Rc;
 
 use super::builder::Builder;
 use super::connection::connect_node;
+use crate::coordinator::Link;
 use crate::node::{NodeId, NodeScheduler};
 use crate::runtime::Runtime;
 
-type Run = Box<dyn FnOnce(Assignment)>;
+type Run = Box<dyn FnOnce(Link)>;
 
 /// Wires and runs one built node; taken by the one caller that runs it.
 #[derive(Clone)]
 pub(super) struct Runner(Rc<RefCell<Option<Run>>>);
 
 impl Runner {
-    pub(super) fn run(&self, assignment: Assignment) {
+    pub(super) fn run(&self, link: Link) {
         let run = self.0.take().expect("the node has already run");
-        run(assignment);
+        run(link);
     }
 }
 
@@ -102,13 +103,13 @@ impl<N: 'static> CreatedNode<N> {
         let node = Rc::new(constructor(&mut builder));
         let (running, handle) = (node.clone(), scheduler.clone());
         // Wire the node through the coordinator and run it until it finishes.
-        let run = move |assignment: Assignment| {
+        let run = move |link: Link| {
             for task in builder.tasks {
                 runtime.spawn_internal(task);
             }
             let frame_transfer = runtime.block_on(connect_node(
                 scheduler.clone(),
-                assignment,
+                link,
                 builder.inputs,
                 builder.outputs,
             ));
@@ -158,7 +159,12 @@ pub fn run_node<N: 'static>(node: CreatedNode<N>) {
 
 /// Run the node under a given assignment, for nodes that share a process.
 pub fn run_node_as<N: 'static>(assignment: Assignment, node: CreatedNode<N>) {
-    node.runner.run(assignment);
+    run_node_on(Link::open(assignment), node);
+}
+
+/// Run the node on a link that is already open, for a node built from the code the link brought.
+pub fn run_node_on<N: 'static>(link: Link, node: CreatedNode<N>) {
+    node.runner.run(link);
 }
 
 /// Package async node methods as startup tasks for `create_node`.
@@ -175,6 +181,8 @@ macro_rules! tasks {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::app::{Connection, Graph, InputPort, Node, OutputPort, PortId};
     use crate::coordinator::spawn;
@@ -196,7 +204,7 @@ mod tests {
                 delay: Time::ZERO,
             }],
         };
-        let (coordinator_endpoint, coordinator) = spawn(graph);
+        let (coordinator_endpoint, coordinator) = spawn(graph, HashMap::new());
         let assign = |node_id| Assignment {
             node_id,
             coordinator_endpoint: coordinator_endpoint.clone(),
@@ -247,7 +255,7 @@ mod tests {
                 delay: Time::ZERO,
             }],
         };
-        let (coordinator_endpoint, coordinator) = spawn(graph);
+        let (coordinator_endpoint, coordinator) = spawn(graph, HashMap::new());
         let assign = |node_id| Assignment {
             node_id,
             coordinator_endpoint: coordinator_endpoint.clone(),

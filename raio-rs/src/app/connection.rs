@@ -5,11 +5,10 @@ use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use futures::future::join_all;
 
-use super::Assignment;
 use super::port::{InputChannel, OutputChannel};
-use crate::coordinator::{SERIALIZER, TRANSPORT, register};
+use crate::coordinator::{Link, SERIALIZER};
 use crate::messages::{
-    CoordinatorMessage, Downstream, Frame, InputInfo, NodeMessage, OutputInfo, RegisterNode,
+    CoordinatorMessage, Downstream, Frame, InputInfo, NodeMessage, OutputInfo, RegisterNode, Reply,
 };
 use crate::node::NodeScheduler;
 use crate::runtime::BoxFuture;
@@ -158,12 +157,17 @@ fn coordinator_link(
 /// Register the node's ports and return the task that transfers frames over all connections.
 pub(crate) async fn connect_node(
     scheduler: Rc<NodeScheduler>,
-    assignment: Assignment,
+    link: Link,
     inputs: Vec<Rc<dyn AnyInput>>,
     outputs: Vec<Rc<dyn AnyOutput>>,
 ) -> BoxFuture<()> {
+    let Link {
+        node_id,
+        mut sender,
+        receiver,
+        ..
+    } = link;
     let mut registration = RegisterNode {
-        node_id: assignment.node_id,
         inputs: Vec::new(),
         outputs: Vec::new(),
     };
@@ -180,10 +184,9 @@ pub(crate) async fn connect_node(
         registration.outputs.push(info);
     }
 
-    let endpoint = &assignment.coordinator_endpoint;
-    let (wiring, sender, receiver) = register(&TRANSPORT, &SERIALIZER, endpoint, registration)
-        .await
-        .unwrap_or_else(|refusal| panic!("node {}: {refusal}", assignment.node_id));
+    let request = SERIALIZER.serialize(&registration);
+    let reply: Reply = SERIALIZER.deserialize(&sender.call(&request).await);
+    let wiring = reply.unwrap_or_else(|refusal| panic!("node {node_id}: {refusal}"));
     scheduler.start();
     // The link stays open while the node runs; the node does not wait for it.
     let link = coordinator_link(scheduler.clone(), sender, receiver);

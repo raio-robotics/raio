@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 use super::connection::{AnyInput, AnyOutput};
 use super::port::{InputChannel, InputPort, OutputChannel, OutputPort, PortId};
@@ -13,6 +11,7 @@ use super::setting::PortSetting;
 use crate::action::{Action, Handles};
 use crate::node::{ExecutionMode, Node, NodeId, NodeScheduler};
 use crate::runtime::BoxFuture;
+use crate::serializer::Payload;
 use crate::time::Time;
 
 /// Creates a node's ports, actions, and clock handles using one shared scheduler.
@@ -39,7 +38,7 @@ impl Builder {
         }
     }
 
-    pub fn input<T: Serialize + DeserializeOwned + 'static>(&mut self) -> InputPort<T> {
+    pub fn input<T: Payload>(&mut self) -> InputPort<T> {
         let setting = PortSetting::new(self.next_port_id());
         let channel = Rc::new(InputChannel::with_setting(setting));
         self.scheduler.add_source(channel.clone());
@@ -84,7 +83,7 @@ impl Builder {
         }
     }
 
-    pub fn output<T: Serialize + DeserializeOwned + 'static>(&mut self) -> OutputPort<T> {
+    pub fn output<T: Payload>(&mut self) -> OutputPort<T> {
         let setting = PortSetting::new(self.next_port_id());
         let channel = Rc::new(OutputChannel::new(setting));
         self.scheduler.add_sink(channel.clone());

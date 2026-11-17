@@ -3,9 +3,18 @@ use serde::{Deserialize, Serialize};
 use crate::time::Time;
 use std::collections::HashMap;
 
+/// A node's first message to its coordinator: it asks for the code its launcher left for it.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RequestCode {
+    pub node_id: usize,
+}
+
+/// The code the coordinator holds for a node; a node written in Rust has none.
+pub type Code = Option<Vec<u8>>;
+
+/// A node's ports, sent once the node has its code.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegisterNode {
-    pub node_id: usize,
     pub inputs: Vec<InputInfo>,
     pub outputs: Vec<OutputInfo>,
 }

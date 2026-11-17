@@ -1,5 +1,12 @@
 pub mod bincode;
 
+use std::rc::Rc;
+
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use bincode::BincodeSerializer;
+
 pub trait Serializer<T> {
     /// The name by which a connection selects this serializer.
     fn name(&self) -> &str {
@@ -7,6 +14,18 @@ pub trait Serializer<T> {
     }
     fn serialize(&self, value: &T) -> Vec<u8>;
     fn deserialize(&self, bytes: &[u8]) -> T;
+}
+
+/// A type that ports can carry; it names the serializer its ports start with.
+pub trait Payload: Sized + 'static {
+    fn default_serializer() -> Rc<dyn Serializer<Self>>;
+}
+
+/// A serde type starts with bincode.
+impl<T: Serialize + DeserializeOwned + 'static> Payload for T {
+    fn default_serializer() -> Rc<dyn Serializer<Self>> {
+        Rc::new(BincodeSerializer)
+    }
 }
 
 #[cfg(test)]

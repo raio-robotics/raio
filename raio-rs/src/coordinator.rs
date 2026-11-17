@@ -1,12 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::thread::JoinHandle;
 
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use futures::future::join_all;
 
-use crate::app::Graph;
-use crate::messages::{CoordinatorMessage, NodeMessage, RegisterNode, Reply, Wiring};
+use crate::app::{Assignment, Graph};
+use crate::messages::{Code, CoordinatorMessage, NodeMessage, RegisterNode, Reply, RequestCode};
+use crate::node::NodeId;
 use crate::runtime::Runtime;
 use crate::serializer::Serializer;
 use crate::serializer::bincode::BincodeSerializer;
@@ -27,6 +28,7 @@ pub struct Coordinator<T: Transport, S> {
 impl<T, S> Coordinator<T, S>
 where
     T: Transport,
+    S: Serializer<RequestCode> + Serializer<Code>,
     S: Serializer<RegisterNode> + Serializer<Reply>,
     S: Serializer<NodeMessage> + Serializer<CoordinatorMessage>,
 {
@@ -41,20 +43,42 @@ where
         self.listener.endpoint()
     }
 
-    /// Wire the nodes once all have registered, then serve them until every node disconnects.
-    pub async fn run(mut self, graph: Graph) -> Result<(), String> {
+    /// Give every node its code, wire the nodes once all have registered, then serve them until
+    /// every node disconnects.
+    pub async fn run(
+        mut self,
+        graph: Graph,
+        mut code: HashMap<NodeId, Vec<u8>>,
+    ) -> Result<(), String> {
         let mut nodes = BTreeMap::new();
-        let mut registered = BTreeMap::new();
+        // Every node first asks for its code.
         for _ in 0..graph.nodes {
-            let (replier, mut receiver) = self.listener.accept().await;
-            let registration: RegisterNode =
-                self.serializer.deserialize(&receiver.recv().await.unwrap());
-            let node_id = registration.node_id;
+            let (mut replier, mut receiver) = self.listener.accept().await;
+            let request: RequestCode = self.serializer.deserialize(&receiver.recv().await.unwrap());
+            let node_id = request.node_id;
+            let reply: Code = code.remove(&node_id);
+            replier.send(&self.serializer.serialize(&reply)).await;
             assert!(
-                registered.insert(node_id, registration).is_none(),
-                "node {node_id} registered twice"
+                nodes.insert(node_id, (replier, receiver)).is_none(),
+                "node {node_id} asked for its code twice"
             );
-            nodes.insert(node_id, (replier, receiver));
+        }
+        // Registrations are read once every node has its code.
+        let mut registered = BTreeMap::new();
+        for (node_id, (_, receiver)) in &mut nodes {
+            let Some(bytes) = receiver.recv().await else {
+                break;
+            };
+            let registration: RegisterNode = self.serializer.deserialize(&bytes);
+            registered.insert(*node_id, registration);
+        }
+        if registered.len() < nodes.len() {
+            // A node failed before it registered. The others stay unwired until their launcher,
+            // which sees the failure, ends them.
+            for (_, receiver) in nodes.values_mut() {
+                while receiver.recv().await.is_some() {}
+            }
+            return Ok(());
         }
         let mut wirings = graph.wire(&registered);
         for (node_id, (replier, _)) in &mut nodes {
@@ -128,27 +152,49 @@ where
     }
 }
 
-/// Describe this node's ports to the coordinator; return their wiring and the open connection.
-pub async fn register<T: Transport, S: Serializer<RegisterNode> + Serializer<Reply>>(
-    transport: &T,
-    serializer: &S,
-    coordinator_endpoint: &str,
-    registration: RegisterNode,
-) -> Result<(Wiring, T::Sender, T::Receiver), String> {
-    let (mut sender, receiver) = transport.connect(coordinator_endpoint).await;
-    let request = serializer.serialize(&registration);
-    let reply: Reply = serializer.deserialize(&sender.call(&request).await);
-    reply.map(|wiring| (wiring, sender, receiver))
+/// A node's connection to its coordinator, which the node opens by asking for its code.
+pub struct Link {
+    pub(crate) node_id: NodeId,
+    /// The code the coordinator held for the node; a node written in Rust has none.
+    pub code: Code,
+    pub(crate) sender: <TcpTransport as Transport>::Sender,
+    pub(crate) receiver: <TcpTransport as Transport>::Receiver,
+}
+
+impl Link {
+    /// Connect to the coordinator and ask for the node's code.
+    pub fn open(assignment: Assignment) -> Self {
+        let Assignment {
+            node_id,
+            coordinator_endpoint,
+        } = assignment;
+        Runtime::new().block_on(async move {
+            let (mut sender, receiver) = TRANSPORT.connect(&coordinator_endpoint).await;
+            let request = SERIALIZER.serialize(&RequestCode { node_id });
+            let code = SERIALIZER.deserialize(&sender.call(&request).await);
+            Self {
+                node_id,
+                code,
+                sender,
+                receiver,
+            }
+        })
+    }
 }
 
 /// Run a coordinator for the graph on its own thread; return its endpoint and the thread.
-pub fn spawn(graph: Graph) -> (String, JoinHandle<Result<(), String>>) {
+///
+/// `code` holds what each node gets when it asks for its code; a node written in Rust has none.
+pub fn spawn(
+    graph: Graph,
+    code: HashMap<NodeId, Vec<u8>>,
+) -> (String, JoinHandle<Result<(), String>>) {
     let (announce, announced) = std::sync::mpsc::channel();
     let coordinator = std::thread::spawn(move || {
         Runtime::new().block_on(async move {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             announce.send(coordinator.endpoint().to_string()).unwrap();
-            coordinator.run(graph).await
+            coordinator.run(graph, code).await
         })
     });
     (announced.recv().unwrap(), coordinator)
@@ -162,31 +208,98 @@ mod tests {
 
     /// Use a separate thread and runtime to simulate each node process.
     fn spawn_node(
-        coordinator: String,
+        coordinator_endpoint: String,
+        node_id: NodeId,
         registration: RegisterNode,
-    ) -> std::thread::JoinHandle<Reply> {
+    ) -> std::thread::JoinHandle<(Code, Reply)> {
         std::thread::spawn(move || {
+            let mut link = Link::open(Assignment {
+                node_id,
+                coordinator_endpoint,
+            });
             Runtime::new().block_on(async move {
-                let registered = register(&TRANSPORT, &SERIALIZER, &coordinator, registration);
+                let request = SERIALIZER.serialize(&registration);
+                let reply = SERIALIZER.deserialize(&link.sender.call(&request).await);
                 // Dropping the connection tells the coordinator that the node finished.
-                registered.await.map(|(wiring, _, _)| wiring)
+                (link.code, reply)
             })
         })
+    }
+
+    /// Start the camera, the planner and the logger as nodes 0, 1 and 2.
+    fn spawn_nodes(endpoint: &str) -> Vec<std::thread::JoinHandle<(Code, Reply)>> {
+        let registrations = registrations().into_iter().enumerate();
+        registrations
+            .map(|(node_id, registration)| spawn_node(endpoint.to_string(), node_id, registration))
+            .collect()
+    }
+
+    #[test]
+    fn a_node_gets_the_code_that_the_coordinator_holds_for_it() {
+        Runtime::new().block_on(async {
+            let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
+            let children = spawn_nodes(coordinator.endpoint());
+            let code = HashMap::from([(1, b"planner".to_vec())]);
+            assert_eq!(coordinator.run(graph(fan_out()), code).await, Ok(()));
+            let codes: Vec<Code> = children
+                .into_iter()
+                .map(|child| child.join().unwrap().0)
+                .collect();
+            // The camera and the logger are in Rust and have no code.
+            assert_eq!(codes, [None, Some(b"planner".to_vec()), None]);
+        });
+    }
+
+    #[test]
+    fn a_node_that_fails_before_it_registers_leaves_the_others_unwired() {
+        Runtime::new().block_on(async {
+            let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
+            let endpoint = coordinator.endpoint().to_string();
+            let (failed, fail) = std::sync::mpsc::channel();
+            let coordinator_endpoint = endpoint.clone();
+            let healthy = std::thread::spawn(move || {
+                let mut link = Link::open(Assignment {
+                    node_id: 0,
+                    coordinator_endpoint,
+                });
+                Runtime::new().block_on(async move {
+                    let registration = RegisterNode {
+                        inputs: Vec::new(),
+                        outputs: Vec::new(),
+                    };
+                    link.sender.send(&SERIALIZER.serialize(&registration)).await;
+                    // The launcher ends this node once it has seen the other one fail.
+                    fail.recv().unwrap();
+                });
+            });
+            let failing = std::thread::spawn(move || {
+                // This node takes its code and fails before it describes its ports.
+                Link::open(Assignment {
+                    node_id: 1,
+                    coordinator_endpoint: endpoint,
+                });
+                failed.send(()).unwrap();
+            });
+            let two_nodes = Graph {
+                nodes: 2,
+                connections: Vec::new(),
+            };
+            assert_eq!(coordinator.run(two_nodes, HashMap::new()).await, Ok(()));
+            healthy.join().unwrap();
+            failing.join().unwrap();
+        });
     }
 
     #[test]
     fn every_node_gets_its_wiring_once_all_have_registered() {
         Runtime::new().block_on(async {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
-            let endpoint = coordinator.endpoint().to_string();
-            let children: Vec<_> = registrations()
-                .into_iter()
-                .map(|registration| spawn_node(endpoint.clone(), registration))
-                .collect();
-            assert_eq!(coordinator.run(graph(fan_out())).await, Ok(()));
+            let children = spawn_nodes(coordinator.endpoint());
+            let wired = coordinator.run(graph(fan_out()), HashMap::new()).await;
+            assert_eq!(wired, Ok(()));
             let wirings: Vec<Wiring> = children
                 .into_iter()
-                .map(|child| child.join().unwrap().unwrap())
+                .map(|child| child.join().unwrap().1.unwrap())
                 .collect();
             assert_eq!(wirings[0][&0].len(), 2);
             assert!(wirings[2].is_empty()); // The logger has no outputs.
@@ -197,19 +310,16 @@ mod tests {
     fn a_graph_that_does_not_fit_is_reported_to_every_node() {
         Runtime::new().block_on(async {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
-            let endpoint = coordinator.endpoint().to_string();
-            let children: Vec<_> = registrations()
-                .into_iter()
-                .map(|registration| spawn_node(endpoint.clone(), registration))
-                .collect();
-            let refused = coordinator.run(graph(fan_out()[..1].to_vec())).await;
+            let children = spawn_nodes(coordinator.endpoint());
+            let one_connection = graph(fan_out()[..1].to_vec());
+            let refused = coordinator.run(one_connection, HashMap::new()).await;
             assert_eq!(
                 refused,
                 Err("input port 3 of node 2 has no connection".to_string())
             );
             for child in children {
                 assert_eq!(
-                    child.join().unwrap(),
+                    child.join().unwrap().1,
                     refused.clone().map(|_| Wiring::default())
                 );
             }
@@ -218,19 +328,24 @@ mod tests {
 
     /// Register a node whose current tag is `now`; return the shutdown tag the coordinator names.
     fn spawn_node_until_shutdown(
-        coordinator: String,
+        coordinator_endpoint: String,
         node_id: usize,
         now: Time,
     ) -> std::thread::JoinHandle<Time> {
         std::thread::spawn(move || {
+            let link = Link::open(Assignment {
+                node_id,
+                coordinator_endpoint,
+            });
             Runtime::new().block_on(async move {
+                let (mut sender, mut receiver) = (link.sender, link.receiver);
                 let registration = RegisterNode {
-                    node_id,
                     inputs: Vec::new(),
                     outputs: Vec::new(),
                 };
-                let registered = register(&TRANSPORT, &SERIALIZER, &coordinator, registration);
-                let (_, mut sender, mut receiver) = registered.await.unwrap();
+                let reply: Reply = SERIALIZER
+                    .deserialize(&sender.call(&SERIALIZER.serialize(&registration)).await);
+                reply.unwrap();
                 if node_id == 0 {
                     let request = NodeMessage::RequestShutdown(Time::new(10));
                     sender.send(&SERIALIZER.serialize(&request)).await;
@@ -261,7 +376,7 @@ mod tests {
                 nodes: 3,
                 connections: Vec::new(),
             };
-            assert_eq!(coordinator.run(unconnected).await, Ok(()));
+            assert_eq!(coordinator.run(unconnected, HashMap::new()).await, Ok(()));
             for child in children {
                 // The first node asked for a delay of 10ns after the latest tag.
                 assert_eq!(child.join().unwrap(), Time::new(17));
@@ -270,24 +385,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "node 0 registered twice")]
+    #[should_panic(expected = "node 0 asked for its code twice")]
     fn duplicate_node_id_is_a_launch_bug() {
         Runtime::new().block_on(async {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             let endpoint = coordinator.endpoint().to_string();
             for _ in 0..2 {
                 let registration = RegisterNode {
-                    node_id: 0,
                     inputs: Vec::new(),
                     outputs: Vec::new(),
                 };
-                spawn_node(endpoint.clone(), registration);
+                spawn_node(endpoint.clone(), 0, registration);
             }
             let two_nodes = Graph {
                 nodes: 2,
                 connections: Vec::new(),
             };
-            let _ = coordinator.run(two_nodes).await; // Both child nodes register the same node ID.
+            // Both child nodes use the same node ID.
+            let _ = coordinator.run(two_nodes, HashMap::new()).await;
         });
     }
 }

@@ -6,13 +6,23 @@ build-backend = "maturin"
 name = "raio-py"
 description = "A deterministic realtime async runtime"
 readme = "../README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "Apache-2.0"
 dynamic = ["version"]
+dependencies = ["cloudpickle"]
 
 [tool.maturin]
-module-name = "raio"
+python-source = "python"
+module-name = "raio._rs.core"
 features = ["extension-module"]
+exclude = [
+    "**/__pycache__/**",
+    "**/*.py[cod]",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/.DS_Store",
+]
 
 [dependency-groups]
 dev = ["pytest"]

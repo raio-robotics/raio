@@ -5,10 +5,11 @@ mod port;
 mod run;
 mod setting;
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 pub use crate::action::{Action, ActionHandle};
-use crate::coordinator;
+use crate::coordinator::{self, Link};
 pub use crate::node::{ExecutionMode, Node};
 use crate::serializer::Serializer;
 use crate::time::Time;
@@ -17,7 +18,7 @@ pub use builder::Builder;
 pub use graph::{Connection, Graph};
 pub use port::{InputPort, OutputPort, PortId};
 use run::Runner;
-pub use run::{Assignment, CreatedNode, Start, create_node, run_node, run_node_as};
+pub use run::{Assignment, CreatedNode, Start, create_node, run_node, run_node_as, run_node_on};
 
 /// Stores the node graph and launches one process per node.
 #[derive(Default)]
@@ -63,7 +64,7 @@ impl App {
     /// Run this process's node, or launch a process for each node and coordinate them.
     pub fn run(self) {
         match Assignment::from_args() {
-            Some(assignment) => self.nodes[assignment.node_id].run(assignment),
+            Some(assignment) => self.nodes[assignment.node_id].run(Link::open(assignment)),
             None => launch(Graph {
                 nodes: self.nodes.len(),
                 connections: self.connections,
@@ -77,7 +78,8 @@ fn launch(graph: Graph) {
     let exe = std::env::current_exe().unwrap();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let nodes = graph.nodes;
-    let (endpoint, coordinator) = coordinator::spawn(graph);
+    // Every node is this program, so the coordinator holds no code for them.
+    let (endpoint, coordinator) = coordinator::spawn(graph, HashMap::new());
     let children: Vec<_> = (0..nodes)
         .map(|node_id| {
             let assignment = Assignment {

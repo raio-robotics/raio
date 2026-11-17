@@ -107,22 +107,19 @@ pub(crate) mod tests {
     }
 
     /// A camera whose image feeds a planner and a logger; the planner also has a plan output.
+    ///
+    /// Each node's id is its position in the list.
     pub(crate) fn registrations() -> Vec<RegisterNode> {
-        let register = |node_id, inputs, outputs| RegisterNode {
-            node_id,
-            inputs,
-            outputs,
-        };
+        let register = |inputs, outputs| RegisterNode { inputs, outputs };
         vec![
-            register(0, vec![], vec![output(0)]),
-            register(1, vec![input(0, "planner:1")], vec![output(1)]),
-            register(2, vec![input(3, "logger:1")], vec![]),
+            register(vec![], vec![output(0)]),
+            register(vec![input(0, "planner:1")], vec![output(1)]),
+            register(vec![input(3, "logger:1")], vec![]),
         ]
     }
 
     fn nodes() -> BTreeMap<NodeId, RegisterNode> {
-        let registrations = registrations().into_iter();
-        registrations.map(|node| (node.node_id, node)).collect()
+        registrations().into_iter().enumerate().collect()
     }
 
     fn connection(from: (NodeId, usize), to: (NodeId, usize)) -> Connection {

@@ -5,6 +5,7 @@ use raio::coordinator::spawn;
 use raio::tasks;
 use raio::time::Time;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::rc::Rc;
@@ -229,7 +230,7 @@ fn launch(input: usize) -> Launched {
             delay: Time::ZERO,
         }],
     };
-    let (coordinator_endpoint, coordinator) = spawn(graph);
+    let (coordinator_endpoint, coordinator) = spawn(graph, HashMap::new());
     let assign = |node_id| Assignment {
         node_id,
         coordinator_endpoint: coordinator_endpoint.clone(),
