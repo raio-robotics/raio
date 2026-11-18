@@ -122,6 +122,10 @@ const config: Config = {
               label: "GitHub Issues",
               href: "https://github.com/raio-robotics/raio/issues",
             },
+            {
+              label: "Slack",
+              href: "https://join.slack.com/t/raio-hq/shared_invite/zt-4h90ce5q9-adb~cElnfDwekfEjcY0BtA",
+            },
           ],
         },
         {
