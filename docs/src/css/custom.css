@@ -28,3 +28,25 @@
   --ifm-color-primary-lightest: #bfdbfe;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
 }
+
+/* Content for one language is hidden unless the reader chose that language; Python is the
+   choice until the reader makes one. See src/components/Language. */
+html:not([data-language="rust"]) [data-language-only="rust"],
+html[data-language="rust"] [data-language-only="python"] {
+  display: none;
+}
+
+/* The theme sets the whole font of inline code, which resets its weight; bold code stays bold. */
+strong > code {
+  font-weight: var(--ifm-font-weight-bold);
+}
+
+/* The lines of a program that the text explains are bold, with no background band. */
+.theme-code-block-highlighted-line {
+  background-color: transparent;
+}
+
+.theme-code-block-highlighted-line,
+.theme-code-block-highlighted-line span {
+  font-weight: var(--ifm-font-weight-bold);
+}

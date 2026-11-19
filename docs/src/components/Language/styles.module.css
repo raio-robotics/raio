@@ -1,0 +1,17 @@
+.selector {
+  margin-bottom: 1.5rem;
+  padding-left: 0;
+}
+
+/* Page content gives every list item after the first a top margin, which would put the second
+   button below the first. */
+.item {
+  margin-top: 0 !important;
+}
+
+/* The button of the chosen language; Python when none is chosen. */
+:global(html:not([data-language="rust"])) .item[data-language-choice="python"],
+:global(html[data-language="rust"]) .item[data-language-choice="rust"] {
+  background: var(--ifm-pills-color-background-active);
+  color: var(--ifm-pills-color-active);
+}

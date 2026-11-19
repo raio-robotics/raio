@@ -15,6 +15,19 @@ const config: Config = {
       crossorigin: "anonymous",
     },
   ],
+  headTags: [
+    {
+      // Applies the reader's language before the page is drawn; see src/components/Language.
+      tagName: "script",
+      attributes: {},
+      innerHTML: `(function () {
+  var linked = new URLSearchParams(window.location.search).get("lang");
+  if (linked === "python" || linked === "rust") window.localStorage.setItem("raio.language", linked);
+  var stored = window.localStorage.getItem("raio.language");
+  document.documentElement.dataset.language = stored === "rust" ? "rust" : "python";
+})();`,
+    },
+  ],
   title: "Raio",
   tagline: "A deterministic realtime async runtime",
   favicon: "img/favicon.png",
