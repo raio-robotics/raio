@@ -1,0 +1,103 @@
+---
+sidebar_position: 2
+---
+
+# Rust API
+
+The crate is published as `raio-rs` and imported as `raio`. Its complete API is documented on [docs.rs](https://docs.rs/raio-rs).
+
+```bash
+cargo add raio-rs
+```
+
+```rust title="core/examples/hello.rs"
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
+use raio::tasks;
+use raio::time::MS;
+use std::rc::Rc;
+
+#[derive(Ports)]
+struct Producer {
+    node: Node,
+    out: OutputPort<String>,
+}
+
+impl Producer {
+    fn new(builder: &mut Builder) -> Self {
+        Self {
+            node: builder.node(),
+            out: builder.output(),
+        }
+    }
+
+    async fn start(self: Rc<Self>) {
+        self.node.wait(1 * MS).await;
+        self.out.set("hello world".to_string());
+    }
+}
+
+#[derive(Ports)]
+struct Sink {
+    input: InputPort<String>,
+}
+
+impl Sink {
+    fn new(builder: &mut Builder) -> Self {
+        Self {
+            input: builder.input(),
+        }
+    }
+
+    async fn start(self: Rc<Self>) {
+        while let Some((value, _)) = self.input.wait().await {
+            println!("sink received {:?}", *value);
+        }
+    }
+}
+
+fn main() {
+    let mut app = App::new();
+    let producer = app.create_node(Producer::new, tasks![Producer::start]);
+    let sink = app.create_node(Sink::new, tasks![Sink::start]);
+    app.connect(&producer.out, &sink.input);
+    app.run();
+}
+```
+
+A node is a struct that derives `Ports`, and a function that takes a `Builder` builds it. `App::create_node` takes that function and the node's tasks, `App::connect` joins two ports, and `App::run` starts one process per node.
+
+```console
+$ cargo run --example hello
+sink received "hello world"
+```
+
+## Rust and Python Side by Side
+
+The two APIs have the same concepts under slightly different names:
+
+| | Rust | Python |
+|---|---|---|
+| Wait in logical time | `node.wait(10 * MS).await` | `await raio.wait(10 * MS)` |
+| Next value of an input | `input.wait().await` | `await port`, `async for value in port` |
+| Value at the current timestamp | `input.get()` | `port.value` when `port.present` |
+| Set an output | `out.set(value)` | `out.set(value)` |
+| React to inputs | `reaction!(self, [a, b], { ... })` | `@reaction(a, b)` |
+| Wait for several things | `select` and `join!` of the `futures` crate | `raio.select`, `raio.gather`, `raio.timeout` |
+| Start another task | `node.spawn(future)` | `raio.spawn(coroutine)` |
+| Current timestamp | `node.now()` | `raio.now()` |
+| Events from threads | `Action<T>` and its `handle()` | `Action[T]` and its `send` |
+| Connect | `app.connect(&a.out, &b.input).delay(d)` | `raio.connect(a.out, b.inp, delay=d)` |
+| Connect physically | `app.connect(&a.out, &b.input).physical()` | `raio.connect(a.out, b.inp, physical=True)` |
+| Shut the app down | `node.request_shutdown()` | `raio.request_shutdown()` |
+| Run at shutdown | `.on_shutdown(Ticker::shutdown)` | `def shutdown(self)` |
+| Draw the app | `app.diagram("app.svg")` | `raio.diagram("app.svg", a, b)` |
+
+## Differences from Python
+
+Port values are serialized with bincode by default, where Python uses pickle. A port that reaches a Python node takes `MessagePackSerializer`; see [Rust and Python in One App](../tutorial/rust-and-python.md).
+
+A Rust task may await a future that Raio does not provide, such as one of another runtime. Its result arrives as a physical event, like a value sent to an action.
+
+The Rust `App` has no fast-forward mode.
+
+The version of the crate is `raio::VERSION`.
