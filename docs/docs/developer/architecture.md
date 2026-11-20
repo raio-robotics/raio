@@ -8,7 +8,7 @@ See [CONTRIBUTING.md](https://github.com/raio-robotics/raio/blob/main/CONTRIBUTI
 
 ## Processes
 
-An app is one process per node, plus the **launcher**: the process that called `run`. The **coordinator** runs inside the launcher.
+An app is one process per node, plus the **launcher**: the process that called `run`. The **coordinator** runs inside the launcher. Each has an id: the coordinator is 0, and the nodes are numbered from 1 in the order in which the program gives them to the app.
 
 A node talks to the coordinator to start up, to report that it is alive, and to shut down. Port values do not pass through the coordinator: nodes send them straight to each other over TCP.
 
@@ -20,7 +20,7 @@ Each node listens on `127.0.0.1`, so the nodes of an app currently run on one ma
 
 ## Crates
 
-The repository is one Cargo workspace with three crates. `raio-rs`, in `core`, is the runtime and the Rust API. `raio-macros`, in `core/macros`, holds the `Ports` derive macro, which Rust requires to be a crate of its own. `raio-py`, in `python`, is the Python binding.
+The repository is one Cargo workspace with three crates. `raio-rs`, in `core`, is the runtime and the Rust API. `raio-macros`, in `core/macros`, holds the `Ports` derive macro and the `#[node]` attribute, which Rust requires to be in a crate of their own. `raio-py`, in `python`, is the Python binding.
 
 ## Modules of the Core
 

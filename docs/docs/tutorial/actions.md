@@ -64,11 +64,8 @@ raio.run(sensor, listener)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {10,23,27,30}
-use raio::app::{Action, App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
-use std::rc::Rc;
+```rust title="src/main.rs" {7,22,26,29}
+use raio::app::{Action, App, Builder, InputPort, Node, OutputPort, Ports, node};
 use std::thread;
 use std::time::Duration;
 
@@ -78,6 +75,7 @@ struct Sensor {
     out: OutputPort<f64>,
 }
 
+#[node]
 impl Sensor {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -86,7 +84,8 @@ impl Sensor {
         }
     }
 
-    async fn forward(self: Rc<Self>) {
+    #[task]
+    async fn forward(&self) {
         let handle = self.readings.handle();
         thread::spawn(move || {
             for reading in [0.1, 0.2, 0.3] {
@@ -106,6 +105,7 @@ struct Listener {
     inp: InputPort<f64>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -114,21 +114,20 @@ impl Listener {
         }
     }
 
-    async fn show(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            println!(
-                "received {} (physical: {})",
-                *self.inp.get().unwrap(),
-                self.node.is_physical()
-            );
-        });
+    #[reaction(inp)]
+    fn show(&self) {
+        println!(
+            "received {} (physical: {})",
+            *self.inp.get().unwrap(),
+            self.node.is_physical()
+        );
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let sensor = app.create_node(Sensor::new, tasks![Sensor::forward]);
-    let listener = app.create_node(Listener::new, tasks![Listener::show]);
+    let sensor = app.create_node(Sensor::new);
+    let listener = app.create_node(Listener::new);
     app.connect(&sensor.out, &listener.inp);
     app.run();
 }

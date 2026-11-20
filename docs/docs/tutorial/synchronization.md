@@ -64,12 +64,9 @@ raio.run(camera, lidar, pair)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {50,52}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {49,52}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::{S, Time};
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
@@ -79,6 +76,7 @@ struct Ticker {
     ticks: i64,
 }
 
+#[node]
 impl Ticker {
     fn new(builder: &mut Builder, period: Time, ticks: i64) -> Self {
         Self {
@@ -89,7 +87,8 @@ impl Ticker {
         }
     }
 
-    async fn tick(self: Rc<Self>) {
+    #[task]
+    async fn tick(&self) {
         for count in 0..self.ticks {
             self.node.wait(self.period).await;
             self.out.set(count);
@@ -104,6 +103,7 @@ struct Pair {
     lidar: InputPort<i64>,
 }
 
+#[node]
 impl Pair {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -113,30 +113,23 @@ impl Pair {
         }
     }
 
-    async fn pair(self: Rc<Self>) {
-        reaction!(self, [camera], {
-            let camera = *self.camera.get().unwrap();
-            match self.lidar.get() {
-                Some(lidar) => {
-                    println!("{}: camera {camera} with lidar {}", self.node.now(), *lidar)
-                }
-                None => println!("{}: camera {camera} alone", self.node.now()),
+    #[reaction(camera)]
+    fn pair(&self) {
+        let camera = *self.camera.get().unwrap();
+        match self.lidar.get() {
+            Some(lidar) => {
+                println!("{}: camera {camera} with lidar {}", self.node.now(), *lidar)
             }
-        });
+            None => println!("{}: camera {camera} alone", self.node.now()),
+        }
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let camera = app.create_node(
-        |builder| Ticker::new(builder, 1 * S, 4),
-        tasks![Ticker::tick],
-    );
-    let lidar = app.create_node(
-        |builder| Ticker::new(builder, 2 * S, 2),
-        tasks![Ticker::tick],
-    );
-    let pair = app.create_node(Pair::new, tasks![Pair::pair]);
+    let camera = app.create_node(|builder| Ticker::new(builder, 1 * S, 4));
+    let lidar = app.create_node(|builder| Ticker::new(builder, 2 * S, 2));
+    let pair = app.create_node(Pair::new);
     app.connect(&camera.out, &pair.camera);
     app.connect(&lidar.out, &pair.lidar);
     app.run();

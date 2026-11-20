@@ -1,7 +1,5 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
@@ -9,6 +7,7 @@ struct Ticker {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Ticker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -17,7 +16,8 @@ impl Ticker {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         for i in 0..3 {
             self.node.wait(1 * MS).await;
             self.out.set(i);
@@ -31,6 +31,7 @@ struct Sink {
     input: InputPort<i64>,
 }
 
+#[node]
 impl Sink {
     fn new(builder: &mut Builder, name: &'static str) -> Self {
         Self {
@@ -39,7 +40,8 @@ impl Sink {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         while let Some((value, timestamp)) = self.input.wait().await {
             println!("{} got {} at {}", self.name, *value, timestamp);
         }
@@ -48,9 +50,9 @@ impl Sink {
 
 fn main() {
     let mut app = App::new();
-    let ticker = app.create_node(Ticker::new, tasks![Ticker::start]);
-    let near = app.create_node(|builder| Sink::new(builder, "near"), tasks![Sink::start]);
-    let far = app.create_node(|builder| Sink::new(builder, "far"), tasks![Sink::start]);
+    let ticker = app.create_node(Ticker::new);
+    let near = app.create_node(|builder| Sink::new(builder, "near"));
+    let far = app.create_node(|builder| Sink::new(builder, "far"));
     // One output feeds both inputs; the second connection adds a 10ms delay.
     app.connect(&ticker.out, &near.input);
     app.connect(&ticker.out, &far.input).delay(10 * MS);

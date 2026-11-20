@@ -49,7 +49,7 @@ class Text:
 def test_a_serializer_that_a_rust_node_lacks_is_refused(rust_nodes, capfd):
     source, scale = Source({"name": "a", "value": 1.5}), Scale(2.0)
     raio.connect(source.out, scale.inp, serializer=Text())
-    with pytest.raises(ValueError, match='input port 0 of node 1 uses the serializer "msgpack"'):
+    with pytest.raises(ValueError, match='input port 0 of node 2 uses the serializer "msgpack"'):
         raio.run(source, scale)
 
 

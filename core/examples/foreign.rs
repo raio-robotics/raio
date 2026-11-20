@@ -1,7 +1,5 @@
-use raio::app::{App, Builder, Node, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, Node, Ports, node};
 use raio::time::S;
-use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Ports)]
@@ -9,6 +7,7 @@ struct Worker {
     node: Node,
 }
 
+#[node]
 impl Worker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -16,7 +15,8 @@ impl Worker {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         self.node.wait(1 * S).await;
         println!(
             "start work at {} (physical: {})",
@@ -32,6 +32,6 @@ impl Worker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Worker::new, tasks![Worker::start]);
+    app.create_node(Worker::new);
     app.run();
 }

@@ -85,7 +85,7 @@ mod tests {
 
     fn setting() -> PortSetting<i64> {
         PortSetting::new(PortId {
-            node_id: 0,
+            node_id: 1,
             port_id: 0,
         })
     }

@@ -376,9 +376,9 @@ mod tests {
         })
     }
 
-    /// Start the camera, the planner and the logger as nodes 0, 1 and 2.
+    /// Start the camera, the planner and the logger as nodes 1, 2 and 3.
     fn spawn_nodes(endpoint: &str) -> Vec<std::thread::JoinHandle<(Code, Reply)>> {
-        let registrations = registrations().into_iter().enumerate();
+        let registrations = (1..).zip(registrations());
         registrations
             .map(|(node_id, registration)| spawn_node(endpoint.to_string(), node_id, registration))
             .collect()
@@ -403,7 +403,7 @@ mod tests {
         Runtime::new().block_on(async {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             let children = spawn_nodes(coordinator.endpoint());
-            let code = HashMap::from([(1, b"planner".to_vec())]);
+            let code = HashMap::from([(2, b"planner".to_vec())]);
             assert_eq!(coordinator.run(graph(fan_out()), code).await, Ok(()));
             let codes: Vec<Code> = children
                 .into_iter()
@@ -427,11 +427,11 @@ mod tests {
         Runtime::new().block_on(async {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             let endpoint = coordinator.endpoint().to_string();
-            let healthy = spawn_node(endpoint.clone(), 0, no_ports());
+            let healthy = spawn_node(endpoint.clone(), 1, no_ports());
             // This node takes its code and fails before it describes its ports.
-            let failing = std::thread::spawn(move || drop(Link::open(1, &endpoint)));
+            let failing = std::thread::spawn(move || drop(Link::open(2, &endpoint)));
             let outcome = coordinator.run(unconnected(2), HashMap::new()).await;
-            assert_eq!(outcome, failed(&[1]));
+            assert_eq!(outcome, failed(&[2]));
             assert_eq!(healthy.join().unwrap().1, Reply::Cancelled);
             failing.join().unwrap();
         });
@@ -443,13 +443,13 @@ mod tests {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             let (endpoint, handle) = (coordinator.endpoint().to_string(), coordinator.handle());
             let healthy = std::thread::spawn(move || {
-                let mut link = Link::open(0, &endpoint);
-                // The launcher sees the process of node 1 exit; that node never connected.
-                handle.node_exited(1, false);
+                let mut link = Link::open(1, &endpoint);
+                // The launcher sees the process of node 2 exit; that node never connected.
+                handle.node_exited(2, false);
                 Runtime::new().block_on(async move { link.register(&no_ports()).await })
             });
             let outcome = coordinator.run(unconnected(2), HashMap::new()).await;
-            assert_eq!(outcome, failed(&[1]));
+            assert_eq!(outcome, failed(&[2]));
             // The node that connected is not left waiting for its wiring.
             assert_eq!(healthy.join().unwrap(), Reply::Cancelled);
         });
@@ -469,6 +469,7 @@ mod tests {
                     reply => panic!("{reply:?}"),
                 })
                 .collect();
+            // The threads are in the order of the nodes: the camera, the planner, the logger.
             assert_eq!(wirings[0].outputs[&0].len(), 2);
             assert!(wirings[2].outputs.is_empty()); // The logger has no outputs.
         });
@@ -481,7 +482,7 @@ mod tests {
             let children = spawn_nodes(coordinator.endpoint());
             let one_connection = graph(fan_out()[..1].to_vec());
             let refused = coordinator.run(one_connection, HashMap::new()).await;
-            let reason = "input port 3 of node 2 has no connection".to_string();
+            let reason = "input port 3 of node 3 has no connection".to_string();
             assert_eq!(refused, Err(Failure::Refused(reason.clone())));
             for child in children {
                 assert_eq!(child.join().unwrap().1, Reply::Refused(reason.clone()));
@@ -496,7 +497,7 @@ mod tests {
     /// `beats` allows; return the message that shuts the node down.
     fn spawn_node_until_shutdown(
         coordinator_endpoint: String,
-        node_id: usize,
+        node_id: NodeId,
         now: Time,
         request: Option<Time>,
         beats: Duration,
@@ -546,11 +547,11 @@ mod tests {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             let endpoint = coordinator.endpoint().to_string();
             let timestamps = [Time::new(3), Time::new(7), Time::new(5)];
-            let children: Vec<_> = (0..3)
-                .map(|node_id| {
+            let children: Vec<_> = (1..)
+                .zip(timestamps)
+                .map(|(node_id, now)| {
                     // The first node asks for a delay of 10ns after the latest timestamp.
-                    let request = (node_id == 0).then_some(Time::new(10));
-                    let now = timestamps[node_id];
+                    let request = (node_id == 1).then_some(Time::new(10));
                     spawn_node_until_shutdown(endpoint.clone(), node_id, now, request, ALWAYS)
                 })
                 .collect();
@@ -570,7 +571,7 @@ mod tests {
             let endpoint = coordinator.endpoint().to_string();
             // An interrupt that comes before the nodes are wired reaches them once they are.
             coordinator.handle().shutdown_now();
-            let children: Vec<_> = (0..3)
+            let children: Vec<_> = (1..=3)
                 .map(|node_id| {
                     spawn_node_until_shutdown(endpoint.clone(), node_id, Time::ZERO, None, ALWAYS)
                 })
@@ -588,20 +589,20 @@ mod tests {
         Runtime::new().block_on(async {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             let endpoint = coordinator.endpoint().to_string();
-            let children: Vec<_> = (0..2)
+            let children: Vec<_> = (1..=2)
                 .map(|node_id| {
                     spawn_node_until_shutdown(endpoint.clone(), node_id, Time::ZERO, None, ALWAYS)
                 })
                 .collect();
             let handle = coordinator.handle();
             let failing = std::thread::spawn(move || {
-                let mut link = Link::open(2, &endpoint);
+                let mut link = Link::open(3, &endpoint);
                 Runtime::new().block_on(async move { link.register(&no_ports()).await });
                 // The node's process fails once the app runs, and its launcher sees that.
-                handle.node_exited(2, false);
+                handle.node_exited(3, false);
             });
             let outcome = coordinator.run(unconnected(3), HashMap::new()).await;
-            assert_eq!(outcome, failed(&[2]));
+            assert_eq!(outcome, failed(&[3]));
             for child in children {
                 assert_eq!(child.join().unwrap(), CoordinatorMessage::ShutdownNow);
             }
@@ -615,16 +616,16 @@ mod tests {
             let mut coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             coordinator.heartbeat_timeout = 8 * BEAT;
             let endpoint = coordinator.endpoint().to_string();
-            let healthy = spawn_node_until_shutdown(endpoint.clone(), 0, Time::ZERO, None, ALWAYS);
+            let healthy = spawn_node_until_shutdown(endpoint.clone(), 1, Time::ZERO, None, ALWAYS);
             // This node sends its heartbeat for several timeouts and then hangs.
             let heartbeats = 4 * coordinator.heartbeat_timeout;
-            let silent = spawn_node_until_shutdown(endpoint, 1, Time::ZERO, None, heartbeats);
+            let silent = spawn_node_until_shutdown(endpoint, 2, Time::ZERO, None, heartbeats);
             let start = Instant::now();
             let outcome = coordinator.run(unconnected(2), HashMap::new()).await;
             // The coordinator does not wait for the silent node, whose link is still open.
             let gave_up = Failure::Nodes {
-                failed: vec![1],
-                silent: vec![1],
+                failed: vec![2],
+                silent: vec![2],
             };
             assert_eq!(outcome, Err(gave_up));
             assert!(
@@ -638,13 +639,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "node 0 asked for its code twice")]
+    #[should_panic(expected = "node 1 asked for its code twice")]
     fn duplicate_node_id_is_a_launch_bug() {
         Runtime::new().block_on(async {
             let coordinator = Coordinator::new(TRANSPORT, SERIALIZER).await;
             let endpoint = coordinator.endpoint().to_string();
             for _ in 0..2 {
-                spawn_node(endpoint.clone(), 0, no_ports());
+                spawn_node(endpoint.clone(), 1, no_ports());
             }
             // Both child nodes use the same node ID.
             let _ = coordinator.run(unconnected(2), HashMap::new()).await;

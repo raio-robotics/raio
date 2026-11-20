@@ -159,7 +159,7 @@ def test_an_error_in_a_spawned_task_fails_the_app(capfd):
             await raio.wait(1 * MS)
             raise ValueError("broken")
 
-    with pytest.raises(RuntimeError, match=r"node 0 \(Faulty\) exited with status 1"):
+    with pytest.raises(RuntimeError, match=r"node 1 \(Faulty\) exited with status 1"):
         raio.run(Faulty())
     captured = capfd.readouterr()
     assert "ValueError: broken" in captured.err and "never printed" not in captured.out

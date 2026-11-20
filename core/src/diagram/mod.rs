@@ -1,6 +1,9 @@
 //! A diagram of an app in the style of Lingua Franca: each node is a box with its ports on its
-//! sides, their names beside them and its tasks in the middle, and each connection is a line.
-//! elkrs places the nodes and routes the connections; `svg` draws the result.
+//! sides, their names beside them and its tasks and reactions in the middle, and each
+//! connection is a line. A task is a rectangle with rounded corners. A reaction is a box with a
+//! point, and a line joins it to each port or action that triggers it. Each task and reaction
+//! has its number in its corner. elkrs places the nodes and routes the connections; `svg` draws
+//! the result.
 
 mod svg;
 
@@ -20,20 +23,33 @@ const TITLE_HEIGHT: f64 = PADDING + TITLE_SIZE + PADDING;
 const PORT_PITCH: f64 = 16.0;
 /// How far a port reaches into the box of its node.
 const PORT_INSET: f64 = 3.3;
+/// The distance between the vertical lines that lead to two reactions from their triggers.
+const TRIGGER_PITCH: f64 = 4.0;
 
 /// What a diagram shows of an app.
 pub struct Diagram {
+    /// The nodes in the order of their ids, which count from 1.
     pub nodes: Vec<DiagramNode>,
     pub connections: Vec<Connection>,
 }
 
-/// What a diagram shows of one node; the node's id is its position among the nodes.
+/// What a diagram shows of one node.
 #[derive(Clone)]
 pub struct DiagramNode {
     pub name: String,
     /// The name and the kind of each port, in the order of their positions.
     pub ports: Vec<(String, PortKind)>,
-    pub tasks: Vec<String>,
+    /// The tasks and reactions, in the order in which the node declares them; their numbers
+    /// count from 1 in this order.
+    pub tasks: Vec<DiagramTask>,
+}
+
+/// What a diagram shows of one task or reaction.
+#[derive(Clone, PartialEq, Debug)]
+pub struct DiagramTask {
+    pub name: String,
+    /// The positions of the ports and actions that trigger a reaction; `None` for a task.
+    pub triggers: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -56,10 +72,20 @@ impl DiagramNode {
             .map(|(position, port)| (position, port.0.as_str()))
     }
 
-    /// The width of the box of each task, which all tasks of a node share.
+    /// The width of the box of each task and reaction, which all of a node share.
     fn task_width(&self) -> f64 {
-        let widest = self.tasks.iter().map(|task| text_width(task, LABEL_SIZE));
+        let names = self.tasks.iter();
+        let widest = names.map(|task| text_width(&task.name, LABEL_SIZE));
         widest.fold(45.0, f64::max) + 4.0 * PADDING
+    }
+
+    /// The width, between the names of the inputs and the column, that the lines from triggers
+    /// to reactions take: the lines to one reaction meet in a vertical line of their own.
+    fn triggers_width(&self) -> f64 {
+        match self.tasks.iter().flat_map(|task| &task.triggers).count() {
+            0 => 0.0,
+            reactions => reactions as f64 * TRIGGER_PITCH + PADDING,
+        }
     }
 
     /// The width of an action with its name beside it.
@@ -96,14 +122,15 @@ impl DiagramNode {
         self.column_height().max(ports)
     }
 
-    /// The size of the node's box. It is wide enough for what its body holds side by side, the
-    /// names of its inputs, the column, and the names of its outputs. And it is wide enough for
-    /// its name, with its id in one corner and as much room in the other.
+    /// The size of the node's box. It is wide enough for what its body holds side by side: the
+    /// names of its inputs, the lines to its reactions, the column, and the names of its
+    /// outputs. And it is wide enough for its name, with its id in one corner and as much room
+    /// in the other.
     fn size(&self, node_id: usize) -> (f64, f64) {
         let names = self.names_width(PortKind::Input) + self.names_width(PortKind::Output);
         let corner = text_width(&node_id.to_string(), LABEL_SIZE) + PADDING;
         let title = text_width(&self.name, TITLE_SIZE) + 2.0 * corner;
-        let width = (names + self.column_width()).max(title);
+        let width = (names + self.triggers_width() + self.column_width()).max(title);
         let body = match self.body_height() {
             0.0 => 0.0,
             body => body + PADDING,
@@ -129,7 +156,7 @@ impl Diagram {
     /// Describe the diagram as a graph for elkrs: the nodes with their sizes and the places of
     /// their ports, and the connections.
     fn graph(&self) -> Value {
-        let nodes = self.nodes.iter().enumerate().map(|(node_id, node)| {
+        let nodes = (1..).zip(&self.nodes).map(|(node_id, node)| {
             let (width, height) = node.size(node_id);
             let side = |kind: PortKind, x: f64| {
                 let ports: Vec<_> = node.ports_of(kind).collect();
@@ -203,14 +230,24 @@ pub(crate) mod tests {
     use crate::coordinator::PortId;
     use crate::time::MS;
 
-    fn node(name: &str, ports: &[(&str, PortKind)], tasks: &[&str]) -> DiagramNode {
+    /// A node with these ports, and these tasks and reactions: a reaction has the positions
+    /// of its triggers, and a task has `None`.
+    fn node(
+        name: &str,
+        ports: &[(&str, PortKind)],
+        tasks: &[(&str, Option<&[usize]>)],
+    ) -> DiagramNode {
+        let tasks = tasks.iter().map(|(name, triggers)| DiagramTask {
+            name: name.to_string(),
+            triggers: triggers.map(<[usize]>::to_vec),
+        });
         DiagramNode {
             name: name.to_string(),
             ports: ports
                 .iter()
                 .map(|(name, kind)| (name.to_string(), *kind))
                 .collect(),
-            tasks: tasks.iter().map(|task| task.to_string()).collect(),
+            tasks: tasks.collect(),
         }
     }
 
@@ -225,27 +262,28 @@ pub(crate) mod tests {
     }
 
     /// A camera whose image feeds a planner and, 10ms later, a logger that also takes the plan
-    /// and the keys that a thread reads.
+    /// and the keys that a thread reads. The planner reacts to the image, and the logger to
+    /// all three of what it takes.
     pub(crate) fn robot() -> Diagram {
         use PortKind::{Action, Input, Output};
         Diagram {
             nodes: vec![
-                node("Camera", &[("image", Output)], &["capture"]),
+                node("Camera", &[("image", Output)], &[("capture", None)]),
                 node(
                     "Planner",
                     &[("image", Input), ("plan", Output)],
-                    &["plan", "report"],
+                    &[("plan", Some(&[0])), ("report", None)],
                 ),
                 node(
                     "Logger",
                     &[("plan", Input), ("keys", Action), ("image", Input)],
-                    &["log"],
+                    &[("log", Some(&[0, 1, 2]))],
                 ),
             ],
             connections: vec![
-                connection((0, 0), (1, 0), Time::ZERO),
-                connection((0, 0), (2, 2), 10 * MS),
-                connection((1, 1), (2, 0), Time::ZERO),
+                connection((1, 0), (2, 0), Time::ZERO),
+                connection((1, 0), (3, 2), 10 * MS),
+                connection((2, 1), (3, 0), Time::ZERO),
             ],
         }
     }
@@ -258,7 +296,7 @@ pub(crate) mod tests {
         let name = text_width("N", TITLE_SIZE) + corners + 2.0 * PADDING;
         assert_eq!(lone.size(7), (name, TITLE_HEIGHT));
         let ports = [("left", PortKind::Input), ("right", PortKind::Output)];
-        let full = node("N", &ports, &["a_rather_long_task_name"]);
+        let full = node("N", &ports, &[("a_rather_long_task_name", None)]);
         let names = text_width("left", LABEL_SIZE) + text_width("right", LABEL_SIZE);
         // The names of the ports are inside the node, on either side of its tasks.
         let body = names + 2.0 * PADDING + full.task_width();
@@ -266,17 +304,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_node_is_wider_by_the_lines_from_the_triggers_of_its_reactions() {
+        let ports = [("a", PortKind::Input), ("b", PortKind::Input)];
+        let task = node("N", &ports, &[("run", None)]);
+        let reaction = node("N", &ports, &[("run", Some(&[0, 1]))]);
+        // The lines to the one reaction meet in one vertical line.
+        let lines = TRIGGER_PITCH + PADDING;
+        assert_eq!(reaction.size(1).0, task.size(1).0 + lines);
+    }
+
+    #[test]
     fn a_node_is_as_high_as_its_tasks_or_as_the_ports_of_one_side() {
-        let tasks = node("N", &[("a", PortKind::Input)], &["first", "second"]);
+        let tasks = node(
+            "N",
+            &[("a", PortKind::Input)],
+            &[("first", None), ("second", None)],
+        );
         let column = 2.0 * TASK_HEIGHT + PADDING;
-        assert_eq!(tasks.size(0).1, TITLE_HEIGHT + column + PADDING);
+        assert_eq!(tasks.size(1).1, TITLE_HEIGHT + column + PADDING);
         let inputs = [
             ("a", PortKind::Input),
             ("b", PortKind::Input),
             ("c", PortKind::Input),
         ];
         let ports = node("N", &inputs, &[]);
-        assert_eq!(ports.size(0).1, TITLE_HEIGHT + 3.0 * PORT_PITCH + PADDING);
+        assert_eq!(ports.size(1).1, TITLE_HEIGHT + 3.0 * PORT_PITCH + PADDING);
     }
 
     #[test]
@@ -289,12 +341,13 @@ pub(crate) mod tests {
                 .map(|port| port["id"].as_str().unwrap())
                 .collect()
         };
-        assert_eq!(ports(0), ["n0.p0"]);
+        // The camera is node 1 and the logger node 3.
+        assert_eq!(ports(0), ["n1.p0"]);
         // The action is not on a side of its node; the inputs keep their positions.
-        assert_eq!(ports(2), ["n2.p0", "n2.p2"]);
+        assert_eq!(ports(2), ["n3.p0", "n3.p2"]);
         let delayed = &graph["edges"][1];
-        assert_eq!(delayed["sources"][0], "n0.p0");
-        assert_eq!(delayed["targets"][0], "n2.p2");
+        assert_eq!(delayed["sources"][0], "n1.p0");
+        assert_eq!(delayed["targets"][0], "n3.p2");
         assert_eq!(delayed["labels"][0]["text"], "10ms");
         assert!(graph["edges"][0]["labels"].as_array().unwrap().is_empty());
     }
@@ -304,7 +357,7 @@ pub(crate) mod tests {
         let svg = robot().to_svg();
         // A node has its name at its top and its id in its corner.
         let texts = [
-            "Camera", "0", "Logger", "2", "capture", "report", "keys", "10ms",
+            "Camera", "1", "Logger", "3", "capture", "report", "keys", "10ms",
         ];
         for text in texts {
             assert!(
@@ -314,9 +367,24 @@ pub(crate) mod tests {
         }
         assert_eq!(svg.matches("class=\"node\"").count(), 3);
         assert_eq!(svg.matches("class=\"port\"").count(), 5);
-        assert_eq!(svg.matches("class=\"task\"").count(), 4);
+        // A task is a rectangle. A reaction is a box with a point, with a line from each of its
+        // triggers: one to the planner's reaction, and three to the logger's.
+        assert_eq!(svg.matches("<rect class=\"task\"").count(), 2);
+        assert_eq!(svg.matches("<polygon class=\"reaction\"").count(), 2);
+        assert_eq!(svg.matches("class=\"trigger\"").count(), 4);
         assert_eq!(svg.matches("class=\"action\"").count(), 1);
         assert_eq!(svg.matches("class=\"connection\"").count(), 3);
+    }
+
+    #[test]
+    fn the_tasks_and_reactions_of_a_node_have_their_numbers_from_1_in_declared_order() {
+        let svg = robot().to_svg();
+        let texts = svg.lines().filter_map(|line| line.strip_suffix("</text>"));
+        let texts: Vec<&str> = texts.map(|text| text.rsplit_once('>').unwrap().1).collect();
+        // The planner is node 2; it declares its reaction before its task.
+        let planner = texts.iter().position(|text| *text == "Planner").unwrap();
+        let shown = ["2", "Planner", "1", "plan", "2", "report"];
+        assert_eq!(texts[planner - 1..planner + 5], shown);
     }
 
     #[test]

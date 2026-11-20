@@ -44,12 +44,9 @@ raio.run(greeter, listener)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {10,31,42,53,56}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {7,21,30,41,52}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Greeter {
@@ -58,6 +55,7 @@ struct Greeter {
     name: String,
 }
 
+#[node]
 impl Greeter {
     fn new(builder: &mut Builder, name: &str) -> Self {
         Self {
@@ -67,7 +65,8 @@ impl Greeter {
         }
     }
 
-    async fn greet(self: Rc<Self>) {
+    #[task]
+    async fn greet(&self) {
         self.node.wait(1 * MS).await;
         self.out.set(format!("hello from {}", self.name));
     }
@@ -78,6 +77,7 @@ struct Listener {
     inp: InputPort<String>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -85,21 +85,17 @@ impl Listener {
         }
     }
 
-    async fn show(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            let (value, time) = self.inp.latest().unwrap();
-            println!("{} at {}", *value, time);
-        });
+    #[reaction(inp)]
+    fn show(&self) {
+        let (value, time) = self.inp.latest().unwrap();
+        println!("{} at {}", *value, time);
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let greeter = app.create_node(
-        |builder| Greeter::new(builder, "raio"),
-        tasks![Greeter::greet],
-    );
-    let listener = app.create_node(Listener::new, tasks![Listener::show]);
+    let greeter = app.create_node(|builder| Greeter::new(builder, "raio"));
+    let listener = app.create_node(Listener::new);
     app.connect(&greeter.out, &listener.inp);
     app.run();
 }
@@ -139,7 +135,7 @@ A node takes its settings in **`__init__`**, like any other class. Above, `Greet
 
 A **node** is a struct that derives **`Ports`**. Each node of an app runs in its own process, so nodes share no memory: everything one node tells another goes through a port.
 
-A node is built by a function that takes a **`Builder`**. The builder creates the node's ports and its **`Node`** handle, which the node uses to wait and to tell the time. A node takes its settings as further arguments of that function. Above, `Greeter::new(builder, "raio")` builds a node whose `name` is `"raio"`.
+A node is built by a function that takes a **`Builder`**. The builder creates the node's ports and its **`Node`** handle, which the node uses to wait and to tell the time. What the node does is in the methods of its `impl` block, which is marked **`#[node]`**. A node takes its settings as further arguments of that function. Above, `Greeter::new(builder, "raio")` builds a node whose `name` is `"raio"`.
 
 Every process of an app runs the same program. `main` therefore runs once in the process that launches the app and once more in each node's process, and each of these processes builds every node before it runs its own. So code that should run once per node belongs in a task, not in `main` or in the function that builds the node.
 
@@ -171,7 +167,7 @@ A **task** is an `async` method marked with **`@task`**. Every task of a node st
 </Python>
 <Rust>
 
-A **task** is an `async` method listed in **`tasks![...]`** when the node is created. Every task of a node starts when the node starts, and the node finishes when all of its tasks have ended.
+A **task** is an `async` method marked with **`#[task]`**. Every task of a node starts when the node starts, and the node finishes when all of its tasks have ended.
 
 </Rust>
 
@@ -219,12 +215,9 @@ raio.run(sender, listener)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {24,31}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {23,31}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Sender {
@@ -232,6 +225,7 @@ struct Sender {
     out: OutputPort<String>,
 }
 
+#[node]
 impl Sender {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -240,14 +234,16 @@ impl Sender {
         }
     }
 
-    async fn first(self: Rc<Self>) {
+    #[task]
+    async fn first(&self) {
         println!("first starts");
         self.node.wait(1 * MS).await;
         self.out.set("from first".to_string());
         println!("first has set the output");
     }
 
-    async fn second(self: Rc<Self>) {
+    #[task]
+    async fn second(&self) {
         println!("second starts");
         self.node.wait(1 * MS).await;
         self.out.set("from second".to_string());
@@ -260,6 +256,7 @@ struct Listener {
     inp: InputPort<String>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -267,18 +264,17 @@ impl Listener {
         }
     }
 
-    async fn show(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            let (value, time) = self.inp.latest().unwrap();
-            println!("received '{}' at {}", *value, time);
-        });
+    #[reaction(inp)]
+    fn show(&self) {
+        let (value, time) = self.inp.latest().unwrap();
+        println!("received '{}' at {}", *value, time);
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let sender = app.create_node(Sender::new, tasks![Sender::first, Sender::second]);
-    let listener = app.create_node(Listener::new, tasks![Listener::show]);
+    let sender = app.create_node(Sender::new);
+    let listener = app.create_node(Listener::new);
     app.connect(&sender.out, &listener.inp);
     app.run();
 }
@@ -375,7 +371,7 @@ A **reaction** is a method marked with **`@reaction(port)`**. It runs each time 
 </Python>
 <Rust>
 
-A **reaction** is written with **`reaction!(self, [port], { ... })`** inside a task. Its body runs each time the port receives a value. Above, the body runs once, at `1ms`, when the greeting arrives.
+A **reaction** is a method marked with **`#[reaction(port)]`**. It runs each time the port receives a value. Above, `show` runs once, at `1ms`, when the greeting arrives.
 
 </Rust>
 
@@ -398,7 +394,7 @@ A reaction ends when its port closes. Above, `Greeter` finishes after its one ta
 </Python>
 <Rust>
 
-**`app.create_node`** takes the function that builds a node and the node's tasks. **`app.connect(&greeter.out, &listener.inp)`** sends every value of the output port to the input port. One output can feed several inputs, but an input takes exactly one output.
+**`app.create_node`** takes the function that builds a node. **`app.connect(&greeter.out, &listener.inp)`** sends every value of the output port to the input port. One output can feed several inputs, but an input takes exactly one output.
 
 **`app.run()`** starts each node in its own process and returns when all of them have finished.
 

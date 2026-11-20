@@ -115,7 +115,7 @@ def test_an_error_in_a_task_fails_the_app(capfd):
             await raio.wait(1 * MS)
             raise ValueError("broken")
 
-    with pytest.raises(RuntimeError, match=r"node 0 \(Faulty\) exited with status 1"):
+    with pytest.raises(RuntimeError, match=r"node 1 \(Faulty\) exited with status 1"):
         raio.run(Faulty(), Ticker(1 * MS, 1_000_000))
     assert "ValueError: broken" in capfd.readouterr().err
 
@@ -134,7 +134,7 @@ def test_an_output_cannot_be_set_at_the_start_timestamp(capfd):
 
 
 def test_an_input_without_a_connection_is_refused(capfd):
-    with pytest.raises(ValueError, match="input port 0 of node 0 has no connection"):
+    with pytest.raises(ValueError, match="input port 0 of node 1 has no connection"):
         raio.run(Printer())
     capfd.readouterr()
 
@@ -142,7 +142,7 @@ def test_an_input_without_a_connection_is_refused(capfd):
 def test_a_physical_connection_takes_no_delay(capfd):
     ticker, printer = Ticker(1 * MS, 1), Printer()
     raio.connect(ticker.out, printer.inp, delay=1 * MS, physical=True)
-    refusal = "input port 0 of node 1 has a physical connection with a delay; it takes none"
+    refusal = "input port 0 of node 2 has a physical connection with a delay; it takes none"
     with pytest.raises(ValueError, match=refusal):
         raio.run(ticker, printer)
     capfd.readouterr()
@@ -203,7 +203,7 @@ def test_a_node_that_cannot_be_rebuilt_in_its_process_fails_the_app(capfd):
             return _fail_to_load, ()
 
     # The healthy node is told that the app does not start, and ends without a word.
-    with pytest.raises(RuntimeError, match=r"node 1 \(Unloadable\) exited with status 1"):
+    with pytest.raises(RuntimeError, match=r"node 2 \(Unloadable\) exited with status 1"):
         raio.run(Ticker(1 * MS, 1_000_000), Unloadable())
     errors = capfd.readouterr().err
     assert "OSError: cannot load here" in errors and "panicked" not in errors

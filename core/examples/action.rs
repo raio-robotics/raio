@@ -1,8 +1,6 @@
-use raio::app::{Action, App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{Action, App, Builder, InputPort, Node, OutputPort, Ports, node};
 use std::io::{self, IsTerminal, Read};
 use std::process::Command;
-use std::rc::Rc;
 use std::thread;
 
 fn stty(settings: &[&str]) {
@@ -23,6 +21,7 @@ struct KeyboardInput {
     out: OutputPort<char>,
 }
 
+#[node]
 impl KeyboardInput {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -31,7 +30,8 @@ impl KeyboardInput {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         let handle = self.keys.handle();
         thread::spawn(move || {
             eprintln!("press keys; Ctrl-D to stop");
@@ -58,6 +58,7 @@ struct Echo {
     input: InputPort<char>,
 }
 
+#[node]
 impl Echo {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -66,7 +67,8 @@ impl Echo {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         while let Some((key, _)) = self.input.wait().await {
             println!("echo {} (physical: {})", *key, self.node.is_physical());
         }
@@ -75,8 +77,8 @@ impl Echo {
 
 fn main() {
     let mut app = App::new();
-    let keyboard = app.create_node(KeyboardInput::new, tasks![KeyboardInput::start]);
-    let echo = app.create_node(Echo::new, tasks![Echo::start]);
+    let keyboard = app.create_node(KeyboardInput::new);
+    let echo = app.create_node(Echo::new);
     app.connect(&keyboard.out, &echo.input);
     app.run();
 }

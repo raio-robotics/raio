@@ -16,8 +16,8 @@ use crate::time::Time;
 ///
 /// ```compile_fail
 /// let mut app = raio::app::App::new();
-/// let out = app.create_node(|builder| builder.output::<i64>(), Vec::new());
-/// let action = app.create_node(|builder| builder.action::<i64>(), Vec::new());
+/// let out = app.create_node(|builder| builder.output::<i64>());
+/// let action = app.create_node(|builder| builder.action::<i64>());
 /// app.connect(&out, &action);
 /// ```
 pub struct Action<T> {

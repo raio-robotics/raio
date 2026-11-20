@@ -1,23 +1,26 @@
 //! Drawing a diagram that elkrs has laid out, in the shapes, sizes and colors that Lingua Franca
-//! gives its reactors, reactions, ports and actions.
+//! gives its reactors, reactions, ports and actions. A task, which Lingua Franca does not have,
+//! is a rectangle with rounded corners.
 
 use std::fmt::Write;
 use std::iter::once;
 
 use serde_json::Value;
 
-use super::{Diagram, DiagramNode, PADDING, PortKind, TITLE_HEIGHT};
+use super::{Diagram, DiagramNode, PADDING, PortKind, TITLE_HEIGHT, TRIGGER_PITCH};
 
 /// The font size of the name of a node.
 pub(super) const TITLE_SIZE: f64 = 10.0;
 /// The font size of every other text.
 pub(super) const LABEL_SIZE: f64 = 8.0;
+/// The font size of the number that a task or reaction has in its corner.
+const ORDER_SIZE: f64 = 6.0;
 /// The width and the height of a port's triangle.
 pub(super) const PORT: f64 = 8.0;
 pub(super) const TASK_HEIGHT: f64 = 22.0;
 /// The width and the height of an action's triangle.
 pub(super) const ACTION: f64 = 18.0;
-/// The length of the point at the right of a task's box, and of the notch at its left.
+/// The length of the point at the right of a reaction's box, and of the notch at its left.
 const POINT: f64 = 6.0;
 /// The drawing is shown this much larger than its coordinates, which keeps its text readable.
 const SCALE: f64 = 1.5;
@@ -57,8 +60,15 @@ fn points(points: &[(f64, f64)]) -> String {
     points.collect::<Vec<_>>().join(" ")
 }
 
-/// Draw a node: its box with its id in the corner and its name, its actions and tasks in a
-/// column, and its ports with their names beside them.
+/// The position of a laid-out port among the ports of its node, which its id ends with.
+fn port_position(port: &Value) -> usize {
+    let position = port["id"].as_str().unwrap().rsplit_once(".p").unwrap().1;
+    position.parse().unwrap()
+}
+
+/// Draw a node: its box with its id in the corner and its name, its actions, tasks and
+/// reactions in a column, each with its number, its ports with their names beside them, and a
+/// line from each trigger to its reaction.
 fn draw_node(svg: &mut String, node_id: usize, node: &DiagramNode, placed: &Value) {
     let (x, y) = (number(placed, "x"), number(placed, "y"));
     let (width, height) = (number(placed, "width"), number(placed, "height"));
@@ -81,12 +91,27 @@ fn draw_node(svg: &mut String, node_id: usize, node: &DiagramNode, placed: &Valu
         &node.name,
     );
 
-    // The column is centered in what the names of the ports leave of the body.
+    // The column is centered in what the names of the ports and the lines to the reactions
+    // leave of the body.
     let (inputs, outputs) = (PortKind::Input, PortKind::Output);
-    let (left, right) = (node.names_width(inputs), node.names_width(outputs));
-    let center = x + (width + left - right) / 2.0;
+    let left = node.names_width(inputs) + node.triggers_width();
+    let center = x + (width + left - node.names_width(outputs)) / 2.0;
+    let column = center - node.column_width() / 2.0;
     let mut top = y + TITLE_HEIGHT + (node.body_height() - node.column_height()) / 2.0;
-    for (_, name) in node.ports_of(PortKind::Action) {
+
+    // Where a line from each trigger starts: after the name of an input, or at the left side
+    // of an action.
+    let mut sources = Vec::new();
+    for port in placed["ports"].as_array().into_iter().flatten() {
+        let position = port_position(port);
+        let (name, kind) = &node.ports[position];
+        if *kind == PortKind::Input {
+            let after_name = x + PADDING + super::text_width(name, LABEL_SIZE) + PADDING / 2.0;
+            let middle = y + number(port, "y") + PORT / 2.0;
+            sources.push((position, (after_name, middle)));
+        }
+    }
+    for (position, name) in node.ports_of(PortKind::Action) {
         let left = center - DiagramNode::action_width(name) / 2.0;
         let (right, bottom) = (left + ACTION, top + ACTION);
         let triangle = points(&[(left + ACTION / 2.0, top), (right, bottom), (left, bottom)]);
@@ -106,26 +131,67 @@ fn draw_node(svg: &mut String, node_id: usize, node: &DiagramNode, placed: &Valu
             "start",
             name,
         );
+        // The middle of the triangle's left side.
+        sources.push((position, (left + ACTION / 4.0, top + ACTION / 2.0)));
         top = bottom + PADDING;
     }
+
     let left = center - node.task_width() / 2.0;
     let right = left + node.task_width();
-    for task in &node.tasks {
+    // The lines to one reaction meet in a vertical line of their own, to the left of the column.
+    let mut reactions = 0;
+    for (order, task) in (1..).zip(&node.tasks) {
         let (middle, bottom) = (top + TASK_HEIGHT / 2.0, top + TASK_HEIGHT);
-        let outline = points(&[
-            (left, top),
-            (right - POINT, top),
-            (right, middle),
-            (right - POINT, bottom),
-            (left, bottom),
-            (left + POINT, middle),
-        ]);
-        writeln!(
-            svg,
-            r#"<polygon class="task" points="{outline}" fill="{TASK_FILL}" stroke="{TASK_BORDER}"/>"#
-        )
-        .unwrap();
-        text(svg, center, middle, LABEL_SIZE, "middle", task);
+        let turn = column - PADDING / 2.0 - (reactions as f64 + 0.5) * TRIGGER_PITCH;
+        reactions += usize::from(task.triggers.is_some());
+        for trigger in task.triggers.iter().flatten() {
+            let source = sources.iter().find(|(position, _)| position == trigger);
+            let (start_x, start_y) = source.expect("a trigger is an input or an action").1;
+            let end = (left + POINT, middle);
+            let path = match start_y == middle {
+                true => points(&[(start_x, start_y), end]),
+                false => points(&[(start_x, start_y), (turn, start_y), (turn, middle), end]),
+            };
+            writeln!(
+                svg,
+                r#"<polyline class="trigger" points="{path}" fill="none" stroke="black"/>"#
+            )
+            .unwrap();
+        }
+        match task.triggers {
+            // A task is a rectangle with rounded corners.
+            None => writeln!(
+                svg,
+                r#"<rect class="task" x="{}" y="{}" width="{}" height="{TASK_HEIGHT}" rx="4" fill="{TASK_FILL}" stroke="{TASK_BORDER}"/>"#,
+                round(left),
+                round(top),
+                round(right - left)
+            )
+            .unwrap(),
+            // A reaction has a notch at its left, where its triggers arrive, and a point at
+            // its right.
+            Some(_) => {
+                let outline = points(&[
+                    (left, top),
+                    (right - POINT, top),
+                    (right, middle),
+                    (right - POINT, bottom),
+                    (left, bottom),
+                    (left + POINT, middle),
+                ]);
+                writeln!(
+                    svg,
+                    r#"<polygon class="reaction" points="{outline}" fill="{TASK_FILL}" stroke="{TASK_BORDER}"/>"#
+                )
+                .unwrap();
+            }
+        }
+        // The number in the top left corner is the place of the task or reaction in the order
+        // in which the node declares them. It starts to the right of a reaction's notch.
+        let number = (left + POINT, top + 2.0 + ORDER_SIZE / 2.0);
+        let order = order.to_string();
+        text(svg, number.0, number.1, ORDER_SIZE, "start", &order);
+        text(svg, center, middle, LABEL_SIZE, "middle", &task.name);
         top = bottom + PADDING;
     }
 
@@ -137,9 +203,7 @@ fn draw_node(svg: &mut String, node_id: usize, node: &DiagramNode, placed: &Valu
             (left, top + PORT),
         ]);
         writeln!(svg, r#"<polygon class="port" points="{triangle}"/>"#).unwrap();
-        // The port's id ends with its position, which finds its name.
-        let position = port["id"].as_str().unwrap().rsplit_once(".p").unwrap().1;
-        let (name, kind) = &node.ports[position.parse::<usize>().unwrap()];
+        let (name, kind) = &node.ports[port_position(port)];
         let middle = top + PORT / 2.0;
         match kind {
             PortKind::Input => text(svg, x + PADDING, middle, LABEL_SIZE, "start", name),
@@ -226,7 +290,7 @@ pub(super) fn draw(diagram: &Diagram, laid_out: &Value) -> String {
         draw_connection(&mut svg, edge, diagram.connections[position].physical);
     }
     let placed = laid_out["children"].as_array().into_iter().flatten();
-    for (node_id, (node, placed)) in diagram.nodes.iter().zip(placed).enumerate() {
+    for (node_id, (node, placed)) in (1..).zip(diagram.nodes.iter().zip(placed)) {
         draw_node(&mut svg, node_id, node, placed);
     }
     svg.push_str("</svg>\n");

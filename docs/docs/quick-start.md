@@ -68,11 +68,8 @@ raio.run(sender, listener)  # run the nodes until all of them finish
 <Rust>
 
 ```rust title="src/main.rs"
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 // A node runs in its own process.
 #[derive(Ports)]
@@ -83,6 +80,7 @@ struct Sender {
     out: OutputPort<String>,
 }
 
+#[node]
 impl Sender {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -92,7 +90,8 @@ impl Sender {
     }
 
     // When a node starts, its tasks are executed.
-    async fn send(self: Rc<Self>) {
+    #[task]
+    async fn send(&self) {
         self.node.wait(1 * MS).await; // one millisecond of logical time
         self.out.set("hello world".to_string()); // send a value through the output port
     }
@@ -104,6 +103,7 @@ struct Listener {
     inp: InputPort<String>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -111,18 +111,17 @@ impl Listener {
         }
     }
 
-    async fn show(self: Rc<Self>) {
-        // A reaction runs each time its port receives a value.
-        reaction!(self, [inp], {
-            println!("{}", *self.inp.get().unwrap()); // read input port values with get()
-        });
+    // A reaction runs each time its port receives a value.
+    #[reaction(inp)]
+    fn show(&self) {
+        println!("{}", *self.inp.get().unwrap()); // read input port values with get()
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let sender = app.create_node(Sender::new, tasks![Sender::send]);
-    let listener = app.create_node(Listener::new, tasks![Listener::show]);
+    let sender = app.create_node(Sender::new);
+    let listener = app.create_node(Listener::new);
     app.connect(&sender.out, &listener.inp); // port connections are type checked
     app.run(); // run the nodes until all of them finish
 }
@@ -183,11 +182,8 @@ raio.run(sender, listener)
 <Rust>
 
 ```rust title="src/main.rs"
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::S;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct TimerSender {
@@ -195,6 +191,7 @@ struct TimerSender {
     out: OutputPort<String>,
 }
 
+#[node]
 impl TimerSender {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -203,7 +200,8 @@ impl TimerSender {
         }
     }
 
-    async fn send(self: Rc<Self>) {
+    #[task]
+    async fn send(&self) {
         for count in 0..3 {
             let now = self.node.wait(1 * S).await; // wait one second of logical time
             self.out.set(format!("tick {count} at {now}"));
@@ -217,6 +215,7 @@ struct Listener {
     inp: InputPort<String>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -224,17 +223,16 @@ impl Listener {
         }
     }
 
-    async fn show(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            println!("{}", *self.inp.get().unwrap());
-        });
+    #[reaction(inp)]
+    fn show(&self) {
+        println!("{}", *self.inp.get().unwrap());
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let sender = app.create_node(TimerSender::new, tasks![TimerSender::send]);
-    let listener = app.create_node(Listener::new, tasks![Listener::show]);
+    let sender = app.create_node(TimerSender::new);
+    let listener = app.create_node(Listener::new);
     app.connect(&sender.out, &listener.inp);
     app.run();
 }

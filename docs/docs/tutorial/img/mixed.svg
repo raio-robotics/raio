@@ -1,32 +1,35 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="523.8" height="111" viewBox="0 0 349.2 74" font-family="Helvetica, Arial, sans-serif">
-<rect x="0.5" y="0.5" width="348.2" height="73" rx="8" fill="white" stroke="#bebebe"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="538.8" height="111" viewBox="0 0 359.2 74" font-family="Helvetica, Arial, sans-serif">
+<rect x="0.5" y="0.5" width="358.2" height="73" rx="8" fill="white" stroke="#bebebe"/>
 <polyline class="connection" points="118.1,45 138.1,45" fill="none" stroke="black"/>
 <polyline class="connection" points="211.1,45 231.1,45" fill="none" stroke="black"/>
 <rect class="node" x="12" y="12" width="101.4" height="50" rx="8" fill="#f2f2f2" stroke="#bebebe"/>
 <g fill="#737373">
-<text x="18" y="25.8" font-size="8" text-anchor="start">0</text>
+<text x="18" y="25.8" font-size="8" text-anchor="start">1</text>
 </g>
 <text x="62.7" y="26.5" font-size="10" text-anchor="middle">Thermometer</text>
-<polygon class="task" points="18,34 81,34 87,45 81,56 18,56 24,45" fill="#a6a6a6" stroke="#737373"/>
+<rect class="task" x="18" y="34" width="69" height="22" rx="4" fill="#a6a6a6" stroke="#737373"/>
+<text x="24" y="41.1" font-size="6" text-anchor="start">1</text>
 <text x="52.5" y="47.8" font-size="8" text-anchor="middle">measure</text>
 <polygon class="port" points="110.1,41 118.1,45 110.1,49"/>
 <text x="107.4" y="47.8" font-size="8" text-anchor="end">out</text>
 <rect class="node" x="142.8" y="15" width="63.6" height="44" rx="8" fill="#f2f2f2" stroke="#bebebe"/>
 <g fill="#737373">
-<text x="148.8" y="28.8" font-size="8" text-anchor="start">1</text>
+<text x="148.8" y="28.8" font-size="8" text-anchor="start">2</text>
 </g>
 <text x="174.6" y="29.5" font-size="10" text-anchor="middle">Scale</text>
 <polygon class="port" points="138.1,41 146.1,45 138.1,49"/>
 <text x="148.8" y="47.8" font-size="8" text-anchor="start">inp</text>
 <polygon class="port" points="203.1,41 211.1,45 203.1,49"/>
 <text x="200.4" y="47.8" font-size="8" text-anchor="end">out</text>
-<rect class="node" x="235.8" y="12" width="101.4" height="50" rx="8" fill="#f2f2f2" stroke="#bebebe"/>
+<rect class="node" x="235.8" y="12" width="111.4" height="50" rx="8" fill="#f2f2f2" stroke="#bebebe"/>
 <g fill="#737373">
-<text x="241.8" y="25.8" font-size="8" text-anchor="start">2</text>
+<text x="241.8" y="25.8" font-size="8" text-anchor="start">3</text>
 </g>
-<text x="286.5" y="26.5" font-size="10" text-anchor="middle">Display</text>
-<polygon class="task" points="262.2,34 325.2,34 331.2,45 325.2,56 262.2,56 268.2,45" fill="#a6a6a6" stroke="#737373"/>
-<text x="296.7" y="47.8" font-size="8" text-anchor="middle">show</text>
+<text x="291.5" y="26.5" font-size="10" text-anchor="middle">Display</text>
+<polyline class="trigger" points="259.2,45 278.2,45" fill="none" stroke="black"/>
+<polygon class="reaction" points="272.2,34 335.2,34 341.2,45 335.2,56 272.2,56 278.2,45" fill="#a6a6a6" stroke="#737373"/>
+<text x="278.2" y="41.1" font-size="6" text-anchor="start">1</text>
+<text x="306.7" y="47.8" font-size="8" text-anchor="middle">show</text>
 <polygon class="port" points="231.1,41 239.1,45 231.1,49"/>
 <text x="241.8" y="47.8" font-size="8" text-anchor="start">inp</text>
 </svg>

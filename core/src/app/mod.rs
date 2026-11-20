@@ -23,15 +23,18 @@ use crate::transport::{AnyTransport, Transport};
 pub use action::{Action, ActionHandle};
 pub use builder::{Builder, Field, OtherField, PortField, Ports};
 pub use port::{InputPort, OutputPort};
-pub use raio_macros::Ports;
+pub use raio_macros::{Ports, node};
 pub use reaction::{Trigger, next_event};
 use run::Runner;
-pub use run::{Assignment, CreatedNode, Start, create_node, run_node, run_node_as, run_node_on};
+pub use run::{
+    Assignment, CreatedNode, Start, Tasks, create_node, run_node, run_node_as, run_node_on,
+};
 
 /// Stores the node graph and launches one process per node.
 #[derive(Default)]
 pub struct App {
     connections: Vec<Connection>,
+    /// The nodes in the order of their ids, which count from 1.
     nodes: Vec<Runner>,
 }
 
@@ -60,12 +63,11 @@ impl App {
     }
 
     /// Build a node; the process assigned to it runs this same node.
-    pub fn create_node<N: Ports + 'static>(
+    pub fn create_node<N: Ports + Tasks + 'static>(
         &mut self,
         constructor: impl FnOnce(&mut Builder) -> N,
-        tasks: Vec<Start<N>>,
     ) -> CreatedNode<N> {
-        let created = CreatedNode::new(self.nodes.len(), constructor, tasks);
+        let created = CreatedNode::new(self.nodes.len() + 1, constructor);
         self.nodes.push(created.runner.clone());
         created
     }
@@ -95,7 +97,7 @@ impl App {
             Some(assignment) => {
                 interrupt::ignore_interrupt();
                 let link = Link::open(assignment.node_id, &assignment.coordinator_endpoint);
-                self.nodes[assignment.node_id].run(link)
+                self.nodes[assignment.node_id - 1].run(link)
             }
             None => launch::launch(Graph {
                 nodes: self.nodes.len(),
@@ -151,9 +153,8 @@ impl<T> ConnectionOptions<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagram::PortKind;
+    use crate::diagram::{DiagramTask, PortKind};
     use crate::serializer::tests::Decimal;
-    use crate::tasks;
     use crate::time::MS;
     use crate::transport::Transport;
     use crate::transport::tests::Loopback;
@@ -165,8 +166,8 @@ mod tests {
         CreatedNode<InputPort<i64>>,
     ) {
         let mut app = App::new();
-        let out = app.create_node(|builder| builder.output(), Vec::new());
-        let input = app.create_node(|builder| builder.input(), Vec::new());
+        let out = app.create_node(|builder| builder.output());
+        let input = app.create_node(|builder| builder.input());
         (app, out, input)
     }
 
@@ -175,8 +176,8 @@ mod tests {
         let (mut app, out, input) = pair();
         app.connect(&out, &input);
         let connection = &app.connections[0];
-        assert_eq!(connection.from.to_string(), "port 0 of node 0");
-        assert_eq!(connection.to.to_string(), "port 0 of node 1");
+        assert_eq!(connection.from.to_string(), "port 0 of node 1");
+        assert_eq!(connection.to.to_string(), "port 0 of node 2");
         assert_eq!(connection.delay, Time::ZERO);
         assert!(!connection.physical);
     }
@@ -191,9 +192,13 @@ mod tests {
         exposure: InputPort<i64>,
     }
 
+    #[node]
     impl Camera {
+        #[task]
         async fn capture(self: Rc<Self>) {}
-        async fn expose(self: Rc<Self>) {}
+
+        #[reaction(exposure, shutter)]
+        fn expose(&self) {}
     }
 
     /// The name and the kind of each port that a diagram shows of the app's second node.
@@ -215,11 +220,17 @@ mod tests {
                 exposure,
             }
         };
-        app.create_node(|builder| builder.output::<i64>(), Vec::new());
-        app.create_node(constructor, tasks![Camera::capture, Camera::expose]);
+        app.create_node(|builder| builder.output::<i64>());
+        app.create_node(constructor);
         let camera = &app.nodes[1].diagram;
         assert_eq!(camera.name, "Camera");
-        assert_eq!(camera.tasks, ["capture", "expose"]);
+        // A task has no triggers; a reaction has the positions of the ports that trigger it.
+        let tasks = [("capture", None), ("expose", Some(vec![0, 2]))];
+        let tasks = tasks.map(|(name, triggers)| DiagramTask {
+            name: name.to_string(),
+            triggers,
+        });
+        assert_eq!(camera.tasks, tasks);
         // A port has the name of the field that holds it, at the position it was added at.
         let ports = [
             ("exposure", PortKind::Input),
@@ -238,7 +249,7 @@ mod tests {
     #[test]
     fn one_output_may_feed_several_inputs() {
         let (mut app, out, input) = pair();
-        let other = app.create_node(|builder| builder.input::<i64>(), Vec::new());
+        let other = app.create_node(|builder| builder.input::<i64>());
         app.connect(&out, &input);
         app.connect(&out, &other).delay(10 * MS);
         assert_eq!(app.connections.len(), 2);
@@ -248,7 +259,7 @@ mod tests {
     #[test]
     fn a_connection_is_physical_only_if_asked() {
         let (mut app, out, input) = pair();
-        let other = app.create_node(|builder| builder.input::<i64>(), Vec::new());
+        let other = app.create_node(|builder| builder.input::<i64>());
         app.connect(&out, &input).physical();
         app.connect(&out, &other);
         assert!(app.connections[0].physical && !app.connections[1].physical);

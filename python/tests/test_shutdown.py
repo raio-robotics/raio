@@ -98,7 +98,7 @@ def test_a_node_that_fails_makes_the_others_shut_down(capfd):
 
     ticker, faulty = Endless(-1, None), Faulty()  # This ticker never asks for a shutdown.
     raio.connect(ticker.out, faulty.inp)
-    with pytest.raises(RuntimeError, match=r"node 1 \(Faulty\) exited with status 1"):
+    with pytest.raises(RuntimeError, match=r"node 2 \(Faulty\) exited with status 1"):
         raio.run(ticker, faulty)
     assert "ticker shut down at" in capfd.readouterr().out
 
@@ -110,7 +110,7 @@ def test_a_node_that_stops_responding_is_given_up_on(capfd):
             await raio.wait(1 * MS)
             time.sleep(3600)  # A task that blocks its thread keeps the node's heartbeat back.
 
-    with pytest.raises(RuntimeError, match=r"node 1 \(Stuck\) stopped responding"):
+    with pytest.raises(RuntimeError, match=r"node 2 \(Stuck\) stopped responding"):
         raio.run(Endless(-1, None), Stuck())
     assert "ticker shut down at" in capfd.readouterr().out
 
@@ -124,6 +124,6 @@ def test_an_error_in_shutdown_fails_the_app(capfd):
         def shutdown(self):
             raise ValueError("broken")
 
-    with pytest.raises(RuntimeError, match=r"node 0 \(Faulty\) exited with status 1"):
+    with pytest.raises(RuntimeError, match=r"node 1 \(Faulty\) exited with status 1"):
         raio.run(Faulty())
     assert "ValueError: broken" in capfd.readouterr().err

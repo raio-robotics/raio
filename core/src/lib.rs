@@ -8,10 +8,8 @@
 //! its timestamp from the wall clock and is marked physical.
 //!
 //! ```no_run
-//! use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-//! use raio::tasks;
+//! use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 //! use raio::time::MS;
-//! use std::rc::Rc;
 //!
 //! #[derive(Ports)]
 //! struct Producer {
@@ -19,6 +17,7 @@
 //!     out: OutputPort<String>,
 //! }
 //!
+//! #[node]
 //! impl Producer {
 //!     fn new(builder: &mut Builder) -> Self {
 //!         Self {
@@ -27,7 +26,8 @@
 //!         }
 //!     }
 //!
-//!     async fn start(self: Rc<Self>) {
+//!     #[task]
+//!     async fn produce(&self) {
 //!         self.node.wait(1 * MS).await;
 //!         self.out.set("hello world".to_string());
 //!     }
@@ -38,6 +38,7 @@
 //!     input: InputPort<String>,
 //! }
 //!
+//! #[node]
 //! impl Sink {
 //!     fn new(builder: &mut Builder) -> Self {
 //!         Self {
@@ -45,16 +46,15 @@
 //!         }
 //!     }
 //!
-//!     async fn start(self: Rc<Self>) {
-//!         while let Some((value, timestamp)) = self.input.wait().await {
-//!             println!("sink received {:?} at {timestamp}", *value);
-//!         }
+//!     #[reaction(input)]
+//!     fn show(&self) {
+//!         println!("sink received {:?}", *self.input.get().unwrap());
 //!     }
 //! }
 //!
 //! let mut app = App::new();
-//! let producer = app.create_node(Producer::new, tasks![Producer::start]);
-//! let sink = app.create_node(Sink::new, tasks![Sink::start]);
+//! let producer = app.create_node(Producer::new);
+//! let sink = app.create_node(Sink::new);
 //! app.connect(&producer.out, &sink.input);
 //! app.run();
 //! ```

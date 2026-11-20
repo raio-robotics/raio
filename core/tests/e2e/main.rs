@@ -1,8 +1,7 @@
 mod tests;
 
-use raio::app::{Assignment, Builder, InputPort, Ports, create_node, run_node_as};
+use raio::app::{Assignment, Builder, InputPort, Ports, create_node, node, run_node_as};
 use raio::coordinator::{Connection, Failure, Graph, PortId, spawn};
-use raio::tasks;
 use raio::time::Time;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -272,8 +271,8 @@ fn failure() {
     let errors = String::from_utf8(output.stderr).unwrap();
     assert!(errors.contains("the sink cannot take 2"), "{errors}");
     // The launcher names the node that failed, not one that then shut down.
-    assert!(errors.contains("node 1 exited with"), "{errors}");
-    assert!(!errors.contains("node 0"), "{errors}");
+    assert!(errors.contains("node 2 exited with"), "{errors}");
+    assert!(!errors.contains("node 1"), "{errors}");
 }
 
 #[test]
@@ -285,7 +284,7 @@ fn silent() {
         "ticker shut down\n"
     );
     let errors = String::from_utf8(output.stderr).unwrap();
-    assert!(errors.contains("node 1 stopped responding"), "{errors}");
+    assert!(errors.contains("node 2 stopped responding"), "{errors}");
 }
 
 #[test]
@@ -325,8 +324,10 @@ struct Collector {
     received: Rc<RefCell<Vec<String>>>,
 }
 
+#[node]
 impl Collector {
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         while let Some((value, _)) = self.input.wait().await {
             self.received.borrow_mut().push(value.clone());
         }
@@ -344,11 +345,11 @@ type Launched = (
 fn launch(input: usize) -> Launched {
     let (from, to) = (
         PortId {
-            node_id: 0,
+            node_id: 1,
             port_id: 0,
         },
         PortId {
-            node_id: 1,
+            node_id: 2,
             port_id: input,
         },
     );
@@ -369,13 +370,13 @@ fn launch(input: usize) -> Launched {
 
     let example = Command::new(example("node"))
         .arg("hello world")
-        .args(assign(0).args())
+        .args(assign(1).args())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    let assignment = assign(1);
+    let assignment = assign(2);
     let collector = std::thread::spawn(move || {
         let received = Rc::new(RefCell::new(Vec::new()));
         let seen = received.clone();
@@ -383,10 +384,7 @@ fn launch(input: usize) -> Launched {
             input: builder.input(),
             received: seen,
         };
-        run_node_as(
-            assignment,
-            create_node(constructor, tasks![Collector::start]),
-        );
+        run_node_as(assignment, create_node(constructor));
         received.take()
     });
     (
@@ -407,7 +405,7 @@ fn a_node_in_its_own_program_is_wired_by_port_position() {
 #[test]
 fn a_graph_that_names_a_missing_port_stops_every_node() {
     let (wired, example, collected) = launch(3);
-    let refusal = "node 1 has no input port 3";
+    let refusal = "node 2 has no input port 3";
     assert_eq!(wired, Err(Failure::Refused(refusal.to_string())));
     assert!(!example.status.success());
     assert!(String::from_utf8(example.stderr).unwrap().contains(refusal));

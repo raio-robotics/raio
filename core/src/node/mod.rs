@@ -12,6 +12,8 @@ use crate::runtime::{Runtime, WakeKind};
 use crate::time::Time;
 pub use scheduler::{EventSink, EventSource, NodeScheduler};
 
+/// Identifies a process of an app. The coordinator is 0, and the nodes count from 1 in the order
+/// in which the app has them.
 pub type NodeId = usize;
 
 /// Provides user tasks with the node's clock and waiting operations.
