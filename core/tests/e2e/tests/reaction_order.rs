@@ -1,9 +1,7 @@
 use raio::app::{
-    Assignment, Builder, InputPort, Node, OutputPort, Ports, create_node, run_node_as,
+    Assignment, Builder, InputPort, Node, OutputPort, Ports, create_node, node, run_node_as,
 };
 use raio::coordinator::{Connection, Graph, PortId, spawn};
-use raio::reaction;
-use raio::tasks;
 use raio::time::{MS, Time};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,12 +11,16 @@ use std::rc::Rc;
 struct Ticker {
     node: Node,
     out: OutputPort<i64>,
+    period: Time,
+    ticks: i64,
 }
 
+#[node]
 impl Ticker {
-    async fn start(self: Rc<Self>, period: Time, ticks: i64) {
-        for i in 0..ticks {
-            self.node.wait(period).await;
+    #[task]
+    async fn start(&self) {
+        for i in 0..self.ticks {
+            self.node.wait(self.period).await;
             self.out.set(i);
         }
     }
@@ -33,23 +35,21 @@ struct Order {
     ran: Rc<RefCell<Vec<(Time, &'static str)>>>,
 }
 
+#[node]
 impl Order {
-    async fn first(self: Rc<Self>) {
-        reaction!(self, [b], {
-            self.ran.borrow_mut().push((self.node.now(), "first"));
-        });
+    #[reaction(b)]
+    fn first(&self) {
+        self.ran.borrow_mut().push((self.node.now(), "first"));
     }
 
-    async fn second(self: Rc<Self>) {
-        reaction!(self, [a], {
-            self.ran.borrow_mut().push((self.node.now(), "second"));
-        });
+    #[reaction(a)]
+    fn second(&self) {
+        self.ran.borrow_mut().push((self.node.now(), "second"));
     }
 
-    async fn third(self: Rc<Self>) {
-        reaction!(self, [a, b], {
-            self.ran.borrow_mut().push((self.node.now(), "third"));
-        });
+    #[reaction(a, b)]
+    fn third(&self) {
+        self.ran.borrow_mut().push((self.node.now(), "third"));
     }
 }
 
@@ -63,7 +63,7 @@ fn reactions_keep_their_order_when_only_some_ports_have_a_value() {
             port_id: 0,
         },
         to: PortId {
-            node_id: 2,
+            node_id: 3,
             port_id: input,
         },
         delay: Time::ZERO,
@@ -71,7 +71,7 @@ fn reactions_keep_their_order_when_only_some_ports_have_a_value() {
     };
     let graph = Graph {
         nodes: 3,
-        connections: vec![connect(0, 0), connect(1, 1)],
+        connections: vec![connect(1, 0), connect(2, 1)],
     };
     let (coordinator_endpoint, coordinator, _) = spawn(graph, HashMap::new());
     let assign = |node_id| Assignment {
@@ -79,7 +79,7 @@ fn reactions_keep_their_order_when_only_some_ports_have_a_value() {
         coordinator_endpoint: coordinator_endpoint.clone(),
     };
 
-    let tickers = [(1 * MS, 4), (2 * MS, 2)].into_iter().enumerate();
+    let tickers = (1..).zip([(1 * MS, 4), (2 * MS, 2)]);
     let tickers: Vec<_> = tickers
         .map(|(node_id, (period, ticks))| {
             let assignment = assign(node_id);
@@ -87,13 +87,14 @@ fn reactions_keep_their_order_when_only_some_ports_have_a_value() {
                 let constructor = |builder: &mut Builder| Ticker {
                     node: builder.node(),
                     out: builder.output(),
+                    period,
+                    ticks,
                 };
-                let tasks = tasks![|ticker: Rc<Ticker>| ticker.start(period, ticks)];
-                run_node_as(assignment, create_node(constructor, tasks));
+                run_node_as(assignment, create_node(constructor));
             })
         })
         .collect();
-    let assignment = assign(2);
+    let assignment = assign(3);
     let order = std::thread::spawn(move || {
         let ran = Rc::new(RefCell::new(Vec::new()));
         let log = ran.clone();
@@ -103,8 +104,7 @@ fn reactions_keep_their_order_when_only_some_ports_have_a_value() {
             b: builder.input(),
             ran: log,
         };
-        let tasks = tasks![Order::first, Order::second, Order::third];
-        run_node_as(assignment, create_node(constructor, tasks));
+        run_node_as(assignment, create_node(constructor));
         ran.take()
     });
 

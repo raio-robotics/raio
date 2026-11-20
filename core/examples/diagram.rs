@@ -1,7 +1,5 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use raio::{reaction, tasks};
-use std::rc::Rc;
 
 // A diagram shows each port by the name of the field that holds it.
 #[derive(Ports)]
@@ -10,6 +8,7 @@ struct Sensor {
     reading: OutputPort<i64>,
 }
 
+#[node]
 impl Sensor {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -18,7 +17,8 @@ impl Sensor {
         }
     }
 
-    async fn sample(self: Rc<Self>) {
+    #[task]
+    async fn sample(&self) {
         for reading in 1..=3 {
             self.node.wait(1 * MS).await;
             self.reading.set(reading);
@@ -32,6 +32,7 @@ struct Controller {
     command: OutputPort<i64>,
 }
 
+#[node]
 impl Controller {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -40,7 +41,8 @@ impl Controller {
         }
     }
 
-    async fn control(self: Rc<Self>) {
+    #[task]
+    async fn control(&self) {
         while let Some((reading, _)) = self.reading.wait().await {
             self.command.set(10 * *reading);
         }
@@ -52,6 +54,7 @@ struct Motor {
     command: InputPort<i64>,
 }
 
+#[node]
 impl Motor {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -59,7 +62,8 @@ impl Motor {
         }
     }
 
-    async fn drive(self: Rc<Self>) {
+    #[task]
+    async fn drive(&self) {
         while let Some((command, timestamp)) = self.command.wait().await {
             println!("motor drives {} at {timestamp}", *command);
         }
@@ -72,6 +76,7 @@ struct Logger {
     command: InputPort<i64>,
 }
 
+#[node]
 impl Logger {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -80,17 +85,16 @@ impl Logger {
         }
     }
 
-    async fn log(self: Rc<Self>) {
-        reaction!(self, [reading, command], {});
-    }
+    #[reaction(reading, command)]
+    fn log(&self) {}
 }
 
 fn main() {
     let mut app = App::new();
-    let sensor = app.create_node(Sensor::new, tasks![Sensor::sample]);
-    let controller = app.create_node(Controller::new, tasks![Controller::control]);
-    let motor = app.create_node(Motor::new, tasks![Motor::drive]);
-    let logger = app.create_node(Logger::new, tasks![Logger::log]);
+    let sensor = app.create_node(Sensor::new);
+    let controller = app.create_node(Controller::new);
+    let motor = app.create_node(Motor::new);
+    let logger = app.create_node(Logger::new);
     app.connect(&sensor.reading, &controller.reading);
     app.connect(&controller.command, &motor.command);
     app.connect(&sensor.reading, &logger.reading).delay(5 * MS);

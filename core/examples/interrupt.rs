@@ -1,7 +1,5 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
@@ -9,6 +7,7 @@ struct Ticker {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Ticker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -17,7 +16,8 @@ impl Ticker {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         // The ticker runs until the user presses ^C.
         let mut count = 0;
         loop {
@@ -27,6 +27,7 @@ impl Ticker {
         }
     }
 
+    #[shutdown]
     fn shutdown(&self) {
         println!("ticker shut down");
     }
@@ -37,6 +38,7 @@ struct Sink {
     input: InputPort<i64>,
 }
 
+#[node]
 impl Sink {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -44,12 +46,14 @@ impl Sink {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         while let Some((value, time)) = self.input.wait().await {
             println!("sink got {} at {}", *value, time);
         }
     }
 
+    #[shutdown]
     fn shutdown(&self) {
         println!("sink shut down");
     }
@@ -57,12 +61,8 @@ impl Sink {
 
 fn main() {
     let mut app = App::new();
-    let ticker = app
-        .create_node(Ticker::new, tasks![Ticker::start])
-        .on_shutdown(Ticker::shutdown);
-    let sink = app
-        .create_node(Sink::new, tasks![Sink::start])
-        .on_shutdown(Sink::shutdown);
+    let ticker = app.create_node(Ticker::new);
+    let sink = app.create_node(Sink::new);
     app.connect(&ticker.out, &sink.input);
     app.run();
 }

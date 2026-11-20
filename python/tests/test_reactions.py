@@ -89,7 +89,7 @@ def test_an_error_in_a_reaction_fails_the_app(capfd):
 
     ticker, faulty = Ticker(1 * MS, 1_000_000), Faulty()
     raio.connect(ticker.out, faulty.inp)
-    with pytest.raises(RuntimeError, match=r"node 1 \(Faulty\) exited with status 1"):
+    with pytest.raises(RuntimeError, match=r"node 2 \(Faulty\) exited with status 1"):
         raio.run(ticker, faulty)
     assert "ValueError: broken" in capfd.readouterr().err
 

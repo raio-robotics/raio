@@ -1,26 +1,30 @@
 use futures::future::{Either, select};
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::{MS, S, Time};
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
     node: Node,
     out: OutputPort<i64>,
+    period: Time,
+    ticks: i64,
 }
 
+#[node]
 impl Ticker {
-    fn new(builder: &mut Builder) -> Self {
+    fn new(builder: &mut Builder, period: Time, ticks: i64) -> Self {
         Self {
             node: builder.node(),
             out: builder.output(),
+            period,
+            ticks,
         }
     }
 
-    async fn start(self: Rc<Self>, period: Time, ticks: i64) {
-        for i in 0..ticks {
-            self.node.wait(period).await;
+    #[task]
+    async fn start(&self) {
+        for i in 0..self.ticks {
+            self.node.wait(self.period).await;
             self.out.set(i);
         }
     }
@@ -33,6 +37,7 @@ struct Merge {
     right: InputPort<i64>,
 }
 
+#[node]
 impl Merge {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -42,7 +47,8 @@ impl Merge {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         loop {
             let closed = match select(self.left.wait(), self.right.wait()).await {
                 Either::Left((value, _)) => value.is_none(),
@@ -73,15 +79,9 @@ impl Merge {
 
 fn main() {
     let mut app = App::new();
-    let fast = app.create_node(
-        Ticker::new,
-        tasks![|ticker: Rc<Ticker>| ticker.start(900 * MS, 6)],
-    );
-    let slow = app.create_node(
-        Ticker::new,
-        tasks![|ticker: Rc<Ticker>| ticker.start(1 * S, 2)],
-    );
-    let merge = app.create_node(Merge::new, tasks![Merge::start]);
+    let fast = app.create_node(|builder| Ticker::new(builder, 900 * MS, 6));
+    let slow = app.create_node(|builder| Ticker::new(builder, 1 * S, 2));
+    let merge = app.create_node(Merge::new);
     app.connect(&fast.out, &merge.left);
     app.connect(&slow.out, &merge.right);
     app.run();

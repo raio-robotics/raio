@@ -1,7 +1,5 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ping {
@@ -10,6 +8,7 @@ struct Ping {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Ping {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -19,7 +18,8 @@ impl Ping {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         // The loop starts here, before the delay of the connection back has passed.
         self.node.wait(1 * MS).await;
         let mut count = 0;
@@ -40,6 +40,7 @@ struct Pong {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Pong {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -48,7 +49,8 @@ impl Pong {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         while let Some((count, _)) = self.input.wait().await {
             self.out.set(*count + 1);
         }
@@ -57,8 +59,8 @@ impl Pong {
 
 fn main() {
     let mut app = App::new();
-    let ping = app.create_node(Ping::new, tasks![Ping::start]);
-    let pong = app.create_node(Pong::new, tasks![Pong::start]);
+    let ping = app.create_node(Ping::new);
+    let pong = app.create_node(Pong::new);
     app.connect(&ping.out, &pong.input);
     // A loop of connections needs a delay.
     app.connect(&pong.out, &ping.input).delay(10 * MS);

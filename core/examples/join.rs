@@ -1,25 +1,29 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::{MS, S, Time};
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
     node: Node,
     out: OutputPort<i64>,
+    period: Time,
+    ticks: i64,
 }
 
+#[node]
 impl Ticker {
-    fn new(builder: &mut Builder) -> Self {
+    fn new(builder: &mut Builder, period: Time, ticks: i64) -> Self {
         Self {
             node: builder.node(),
             out: builder.output(),
+            period,
+            ticks,
         }
     }
 
-    async fn start(self: Rc<Self>, period: Time, ticks: i64) {
-        for i in 0..ticks {
-            self.node.wait(period).await;
+    #[task]
+    async fn start(&self) {
+        for i in 0..self.ticks {
+            self.node.wait(self.period).await;
             self.out.set(i);
         }
     }
@@ -31,6 +35,7 @@ struct Worker {
     input: InputPort<i64>,
 }
 
+#[node]
 impl Worker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -39,13 +44,15 @@ impl Worker {
         }
     }
 
-    async fn consume(self: Rc<Self>) {
+    #[task]
+    async fn consume(&self) {
         while let Some((value, timestamp)) = self.input.wait().await {
             println!("consume {} at {}", *value, timestamp);
         }
     }
 
-    async fn produce(self: Rc<Self>) {
+    #[task]
+    async fn produce(&self) {
         for i in 0..4 {
             let now = self.node.wait(700 * MS).await;
             println!("produce {i} at {now}");
@@ -55,11 +62,8 @@ impl Worker {
 
 fn main() {
     let mut app = App::new();
-    let ticker = app.create_node(
-        Ticker::new,
-        tasks![|ticker: Rc<Ticker>| ticker.start(1 * S, 4)],
-    );
-    let worker = app.create_node(Worker::new, tasks![Worker::consume, Worker::produce]);
+    let ticker = app.create_node(|builder| Ticker::new(builder, 1 * S, 4));
+    let worker = app.create_node(Worker::new);
     app.connect(&ticker.out, &worker.input);
     app.run();
 }

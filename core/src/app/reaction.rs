@@ -27,19 +27,9 @@ pub async fn next_event(triggers: Vec<Trigger<'_>>) -> bool {
     .await
 }
 
-/// Run the body once per timestamp at which any of the ports has a value, until all have closed.
-#[macro_export]
-macro_rules! reaction {
-    ($self:ident, [$($port:ident),+ $(,)?], $body:block) => {{
-        // A closed port stays closed, so every round may wait for all of the ports again.
-        while $crate::app::next_event(vec![$($self.$port.trigger()),+]).await {
-            $body
-        }
-    }};
-}
-
 #[cfg(test)]
 mod tests {
+    use super::next_event;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -65,11 +55,11 @@ mod tests {
 
         let (node, out, clock) = (merge.clone(), runs.clone(), scheduler.clone());
         scheduler.spawn(async move {
-            reaction!(node, [left, right], {
+            while next_event(vec![node.left.trigger(), node.right.trigger()]).await {
                 let (left, right) = (node.left.get(), node.right.get());
                 let values = (left.map(|value| *value), right.map(|value| *value));
                 out.borrow_mut().push((clock.now(), values.0, values.1));
-            });
+            }
         });
         scheduler.run_until_idle();
         (scheduler, merge, runs)

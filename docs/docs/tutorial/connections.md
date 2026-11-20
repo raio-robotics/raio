@@ -55,12 +55,9 @@ raio.run(planner, controller)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {25,69}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {24,66}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
@@ -70,6 +67,7 @@ struct Planner {
     out: OutputPort<String>,
 }
 
+#[node]
 impl Planner {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -78,7 +76,8 @@ impl Planner {
         }
     }
 
-    async fn plan(self: Rc<Self>) {
+    #[task]
+    async fn plan(&self) {
         self.node.wait(1 * MS).await;
         thread::sleep(Duration::from_millis(400));
         self.out.set("plan".to_string());
@@ -91,6 +90,7 @@ struct Controller {
     inp: InputPort<String>,
 }
 
+#[node]
 impl Controller {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -99,31 +99,28 @@ impl Controller {
         }
     }
 
-    async fn control(self: Rc<Self>) {
+    #[task]
+    async fn control(&self) {
         for _ in 0..3 {
             let now = self.node.wait(1 * MS).await;
             println!("control at {now}, lag {}", self.node.physical_now() - now);
         }
     }
 
-    async fn show(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            println!(
-                "received {} at {}",
-                *self.inp.get().unwrap(),
-                self.node.now()
-            );
-        });
+    #[reaction(inp)]
+    fn show(&self) {
+        println!(
+            "received {} at {}",
+            *self.inp.get().unwrap(),
+            self.node.now()
+        );
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let planner = app.create_node(Planner::new, tasks![Planner::plan]);
-    let controller = app.create_node(
-        Controller::new,
-        tasks![Controller::control, Controller::show],
-    );
+    let planner = app.create_node(Planner::new);
+    let controller = app.create_node(Controller::new);
     app.connect(&planner.out, &controller.inp);
     app.run();
 }
@@ -202,12 +199,9 @@ raio.run(sender, listener)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {52}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {51}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Sender {
@@ -215,6 +209,7 @@ struct Sender {
     out: OutputPort<String>,
 }
 
+#[node]
 impl Sender {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -223,7 +218,8 @@ impl Sender {
         }
     }
 
-    async fn send(self: Rc<Self>) {
+    #[task]
+    async fn send(&self) {
         self.node.wait(1 * MS).await;
         self.out.set("hello".to_string());
     }
@@ -235,6 +231,7 @@ struct Listener {
     inp: InputPort<String>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -243,17 +240,16 @@ impl Listener {
         }
     }
 
-    async fn show(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            println!("{} at {}", *self.inp.get().unwrap(), self.node.now());
-        });
+    #[reaction(inp)]
+    fn show(&self) {
+        println!("{} at {}", *self.inp.get().unwrap(), self.node.now());
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let sender = app.create_node(Sender::new, tasks![Sender::send]);
-    let listener = app.create_node(Listener::new, tasks![Listener::show]);
+    let sender = app.create_node(Sender::new);
+    let listener = app.create_node(Listener::new);
     app.connect(&sender.out, &listener.inp).delay(10 * MS);
     app.run();
 }
@@ -362,12 +358,9 @@ raio.run(ping, pong)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {61}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {60}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ping {
@@ -376,6 +369,7 @@ struct Ping {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Ping {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -385,7 +379,8 @@ impl Ping {
         }
     }
 
-    async fn ping(self: Rc<Self>) {
+    #[task]
+    async fn ping(&self) {
         self.node.wait(1 * MS).await;
         let mut count = 0;
         for _ in 0..3 {
@@ -403,6 +398,7 @@ struct Pong {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Pong {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -411,17 +407,16 @@ impl Pong {
         }
     }
 
-    async fn pong(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            self.out.set(*self.inp.get().unwrap() + 1);
-        });
+    #[reaction(inp)]
+    fn pong(&self) {
+        self.out.set(*self.inp.get().unwrap() + 1);
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let ping = app.create_node(Ping::new, tasks![Ping::ping]);
-    let pong = app.create_node(Pong::new, tasks![Pong::pong]);
+    let ping = app.create_node(Ping::new);
+    let pong = app.create_node(Pong::new);
     app.connect(&ping.out, &pong.inp);
     app.connect(&pong.out, &ping.inp).delay(10 * MS);
     app.run();
@@ -512,12 +507,9 @@ raio.run(ping, pong)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {30,61}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {29,60}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ping {
@@ -526,6 +518,7 @@ struct Ping {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Ping {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -535,7 +528,8 @@ impl Ping {
         }
     }
 
-    async fn ping(self: Rc<Self>) {
+    #[task]
+    async fn ping(&self) {
         let mut count = 0;
         for _ in 0..3 {
             self.node.wait(1 * MS).await;
@@ -553,6 +547,7 @@ struct Pong {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Pong {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -561,17 +556,16 @@ impl Pong {
         }
     }
 
-    async fn pong(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            self.out.set(*self.inp.get().unwrap() + 1);
-        });
+    #[reaction(inp)]
+    fn pong(&self) {
+        self.out.set(*self.inp.get().unwrap() + 1);
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let ping = app.create_node(Ping::new, tasks![Ping::ping]);
-    let pong = app.create_node(Pong::new, tasks![Pong::pong]);
+    let ping = app.create_node(Ping::new);
+    let pong = app.create_node(Pong::new);
     app.connect(&ping.out, &pong.inp);
     app.connect(&pong.out, &ping.inp).physical();
     app.run();

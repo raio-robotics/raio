@@ -39,7 +39,7 @@ An app whose nodes run forever needs another way to stop. Below, `Ticker` never 
 </Python>
 <Rust>
 
-**`node.request_shutdown()`** asks every node of the app to shut down at one timestamp. **`node.request_shutdown_after(delay)`** does the same, `delay` later. A node that was given a function with **`on_shutdown`** runs it once, at that timestamp.
+**`node.request_shutdown()`** asks every node of the app to shut down at one timestamp. **`node.request_shutdown_after(delay)`** does the same, `delay` later. A node that has a method marked **`#[shutdown]`** runs it once, at that timestamp.
 
 </Rust>
 
@@ -85,12 +85,9 @@ raio.run(ticker, listener)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {27,71,74}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {26,32,62}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
@@ -98,6 +95,7 @@ struct Ticker {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Ticker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -106,7 +104,8 @@ impl Ticker {
         }
     }
 
-    async fn tick(self: Rc<Self>) {
+    #[task]
+    async fn tick(&self) {
         let mut count = 0;
         loop {
             self.node.wait(1 * MS).await;
@@ -118,6 +117,7 @@ impl Ticker {
         }
     }
 
+    #[shutdown]
     fn shutdown(&self) {
         println!("ticker shut down at {}", self.node.now());
     }
@@ -129,6 +129,7 @@ struct Listener {
     inp: InputPort<i64>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -137,16 +138,16 @@ impl Listener {
         }
     }
 
-    async fn show(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            println!(
-                "received {} at {}",
-                *self.inp.get().unwrap(),
-                self.node.now()
-            );
-        });
+    #[reaction(inp)]
+    fn show(&self) {
+        println!(
+            "received {} at {}",
+            *self.inp.get().unwrap(),
+            self.node.now()
+        );
     }
 
+    #[shutdown]
     fn shutdown(&self) {
         println!("listener shut down at {}", self.node.now());
     }
@@ -154,12 +155,8 @@ impl Listener {
 
 fn main() {
     let mut app = App::new();
-    let ticker = app
-        .create_node(Ticker::new, tasks![Ticker::tick])
-        .on_shutdown(Ticker::shutdown);
-    let listener = app
-        .create_node(Listener::new, tasks![Listener::show])
-        .on_shutdown(Listener::shutdown);
+    let ticker = app.create_node(Ticker::new);
+    let listener = app.create_node(Listener::new);
     app.connect(&ticker.out, &listener.inp);
     app.run();
 }
@@ -204,7 +201,7 @@ A node fails when one of its tasks or reactions raises an error, or when its pro
 
 <Python>
 
-The other nodes run their `shutdown` methods; the node that failed does not. The error of the failed node is printed, and `raio.run` raises a `RuntimeError` that names it, such as `node 0 (Ticker) exited with status 1`.
+The other nodes run their `shutdown` methods; the node that failed does not. The error of the failed node is printed, and `raio.run` raises a `RuntimeError` that names it, such as `node 1 (Ticker) exited with status 1`.
 
 </Python>
 <Rust>

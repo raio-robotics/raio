@@ -7,7 +7,7 @@ use std::rc::Rc;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use raio::app::{Builder, ExecutionMode, Start, create_node, run_node_on};
+use raio::app::{Builder, ExecutionMode, Start, Tasks, create_node, run_node_on};
 use raio::coordinator::Link;
 use raio::diagram::PortKind;
 use raio::runtime::Runtime;
@@ -83,6 +83,23 @@ async fn start_tasks(running: Rc<RunningNode>, start: Py<PyAny>) {
     }
 }
 
+/// Python lists the node's tasks itself, so the node has one task here, which starts them.
+impl Tasks for RunningNode {
+    fn starts(&self) -> Vec<Start<Self>> {
+        let start = self.start.take().expect("a node starts once");
+        vec![Start::task("start", move |running| {
+            Box::pin(start_tasks(running, start))
+        })]
+    }
+
+    fn on_shutdown(&self) {
+        // An error in the shutdown method fails the node, as an error in a task does.
+        if let Err(error) = Python::attach(|py| self.shutdown.call0(py)) {
+            self.fail(error);
+        }
+    }
+}
+
 /// Carries the runtime's blocking wait across the release of the GIL.
 struct IdleWait<'a>(&'a mut dyn FnMut());
 
@@ -130,19 +147,12 @@ fn run_node(
             ports: build_ports(builder, &kinds, serializers),
             node: builder.node(),
             failure: RefCell::new(None),
+            start: RefCell::new(Some(start)),
+            shutdown,
         }
     };
-    let start = Start::new("start", move |running| {
-        Box::pin(start_tasks(running, start))
-    });
     Runtime::set_idle_hook(release_gil);
-    let node = create_node(build, vec![start]).on_shutdown(move |running: &RunningNode| {
-        // An error in the shutdown method fails the node, as an error in a task does.
-        if let Err(error) = Python::attach(|py| shutdown.call0(py)) {
-            running.fail(error);
-        }
-    });
-    run_node_on(link, node);
+    run_node_on(link, create_node(build));
     ACTION_SENDERS.lock().unwrap().clear(); // A value sent from now on finds its action closed.
     let failure = RUNNING.take().and_then(|running| running.failure.take());
     failure.map_or(Ok(()), Err)

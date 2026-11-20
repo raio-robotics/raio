@@ -13,11 +13,15 @@ use crate::ports::{Port, Source};
 use crate::serializer::PyValue;
 use crate::time::PyTime;
 
-/// The node that runs on this thread: its clock, its ports and the error that stopped it.
+/// The node that runs on this thread: its clock, its ports, the error that stopped it, and the
+/// Python functions that start its tasks and run its shutdown method.
 pub(crate) struct RunningNode {
     pub(crate) node: Node,
     pub(crate) ports: Vec<Port>,
     pub(crate) failure: RefCell<Option<PyErr>>,
+    /// Returns the coroutines of the node's tasks; taken when the node starts.
+    pub(crate) start: RefCell<Option<Py<PyAny>>>,
+    pub(crate) shutdown: Py<PyAny>,
 }
 
 /// Python names the ports itself, after the attributes that declare them.

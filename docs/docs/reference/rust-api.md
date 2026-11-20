@@ -11,10 +11,8 @@ cargo add raio-rs
 ```
 
 ```rust title="core/examples/hello.rs"
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Producer {
@@ -22,6 +20,7 @@ struct Producer {
     out: OutputPort<String>,
 }
 
+#[node]
 impl Producer {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -30,7 +29,8 @@ impl Producer {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         self.node.wait(1 * MS).await;
         self.out.set("hello world".to_string());
     }
@@ -41,6 +41,7 @@ struct Sink {
     input: InputPort<String>,
 }
 
+#[node]
 impl Sink {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -48,7 +49,8 @@ impl Sink {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         while let Some((value, _)) = self.input.wait().await {
             println!("sink received {:?}", *value);
         }
@@ -57,14 +59,14 @@ impl Sink {
 
 fn main() {
     let mut app = App::new();
-    let producer = app.create_node(Producer::new, tasks![Producer::start]);
-    let sink = app.create_node(Sink::new, tasks![Sink::start]);
+    let producer = app.create_node(Producer::new);
+    let sink = app.create_node(Sink::new);
     app.connect(&producer.out, &sink.input);
     app.run();
 }
 ```
 
-A node is a struct that derives `Ports`, and a function that takes a `Builder` builds it. `App::create_node` takes that function and the node's tasks, `App::connect` joins two ports, and `App::run` starts one process per node.
+A node is a struct that derives `Ports`, and a function that takes a `Builder` builds it. Its `impl` block is marked `#[node]`, and the methods in it that are marked `#[task]`, `#[reaction(...)]` or `#[shutdown]` are what the node runs. `App::create_node` takes the function that builds the node, `App::connect` joins two ports, and `App::run` starts one process per node.
 
 ```console
 $ cargo run --example hello
@@ -81,7 +83,8 @@ The two APIs have the same concepts under slightly different names:
 | Next value of an input | `input.wait().await` | `await port`, `async for value in port` |
 | Value at the current timestamp | `input.get()` | `port.value` when `port.present` |
 | Set an output | `out.set(value)` | `out.set(value)` |
-| React to inputs | `reaction!(self, [a, b], { ... })` | `@reaction(a, b)` |
+| Declare a task | `#[task]` on an `async` method | `@task` on an `async` method |
+| React to inputs | `#[reaction(a, b)]` on a method | `@reaction(a, b)` on a method |
 | Wait for several things | `select` and `join!` of the `futures` crate | `raio.select`, `raio.gather`, `raio.timeout` |
 | Start another task | `node.spawn(future)` | `raio.spawn(coroutine)` |
 | Current timestamp | `node.now()` | `raio.now()` |
@@ -89,7 +92,7 @@ The two APIs have the same concepts under slightly different names:
 | Connect | `app.connect(&a.out, &b.input).delay(d)` | `raio.connect(a.out, b.inp, delay=d)` |
 | Connect physically | `app.connect(&a.out, &b.input).physical()` | `raio.connect(a.out, b.inp, physical=True)` |
 | Shut the app down | `node.request_shutdown()` | `raio.request_shutdown()` |
-| Run at shutdown | `.on_shutdown(Ticker::shutdown)` | `def shutdown(self)` |
+| Run at shutdown | `#[shutdown]` on a method | `def shutdown(self)` |
 | Draw the app | `app.diagram("app.svg")` | `raio.diagram("app.svg", a, b)` |
 
 ## Differences from Python

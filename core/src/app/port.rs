@@ -321,7 +321,7 @@ impl InputPort<i64> {
         let channel = Rc::new(InputChannel::new());
         scheduler.add_source(channel.clone());
         let id = crate::coordinator::PortId {
-            node_id: 0,
+            node_id: 1,
             port_id: 0,
         };
         let port = InputPort {
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn output_channel_fans_out_to_every_sender() {
         let ch = OutputChannel::<i64>::new(PortSetting::new(crate::coordinator::PortId {
-            node_id: 0,
+            node_id: 1,
             port_id: 0,
         }));
         let log = Rc::new(RefCell::new(Vec::new()));

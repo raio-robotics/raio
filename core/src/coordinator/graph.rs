@@ -34,7 +34,7 @@ pub struct Connection {
 /// The nodes of an app and the connections between their ports.
 #[derive(Clone, Debug)]
 pub struct Graph {
-    /// The number of nodes; a node's id is its position among them.
+    /// The number of nodes; their ids count from 1.
     pub nodes: usize,
     pub connections: Vec<Connection>,
 }
@@ -151,7 +151,7 @@ pub(crate) mod tests {
 
     /// A camera whose image feeds a planner and a logger; the planner also has a plan output.
     ///
-    /// Each node's id is its position in the list.
+    /// Their ids are 1, 2 and 3.
     pub(crate) fn registrations() -> Vec<RegisterNode> {
         let register = |inputs, outputs| RegisterNode { inputs, outputs };
         vec![
@@ -162,7 +162,7 @@ pub(crate) mod tests {
     }
 
     fn nodes() -> BTreeMap<NodeId, RegisterNode> {
-        registrations().into_iter().enumerate().collect()
+        (1..).zip(registrations()).collect()
     }
 
     fn connection(from: (NodeId, usize), to: (NodeId, usize)) -> Connection {
@@ -183,7 +183,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fan_out() -> Vec<Connection> {
-        vec![connection((0, 0), (1, 0)), connection((0, 0), (2, 3))]
+        vec![connection((1, 0), (2, 0)), connection((1, 0), (3, 3))]
     }
 
     #[test]
@@ -195,14 +195,14 @@ pub(crate) mod tests {
         let to = |input, delay| Downstream { input, delay };
         // The output feeds both inputs, in the order the graph lists them.
         assert_eq!(
-            wirings[&0].outputs[&0],
+            wirings[&1].outputs[&0],
             vec![
                 to(input(0, "planner:1"), Time::ZERO),
                 to(input(3, "logger:1"), 10 * MS)
             ]
         );
-        assert!(wirings[&1].outputs.is_empty()); // Nothing listens to the plan.
-        assert!(wirings[&2].outputs.is_empty());
+        assert!(wirings[&2].outputs.is_empty()); // Nothing listens to the plan.
+        assert!(wirings[&3].outputs.is_empty());
     }
 
     #[test]
@@ -211,14 +211,14 @@ pub(crate) mod tests {
         delayed[1].delay = 10 * MS;
         let wirings = graph(delayed).wire(&nodes()).unwrap();
 
-        assert!(wirings[&0].inputs.is_empty()); // The camera has no inputs.
+        assert!(wirings[&1].inputs.is_empty()); // The camera has no inputs.
         let logical = |ent| Upstream {
             ent,
             physical: false,
         };
         // The camera can first send at (0, 1), and a connection without a delay keeps that.
-        assert_eq!(wirings[&1].inputs[&0], logical(Time::ZERO.next_microstep()));
-        assert_eq!(wirings[&2].inputs[&3], logical(10 * MS)); // A delay resets the microstep.
+        assert_eq!(wirings[&2].inputs[&0], logical(Time::ZERO.next_microstep()));
+        assert_eq!(wirings[&3].inputs[&3], logical(10 * MS)); // A delay resets the microstep.
     }
 
     #[test]
@@ -230,8 +230,8 @@ pub(crate) mod tests {
             ent: Time::FOREVER,
             physical: true,
         };
-        assert_eq!(wirings[&2].inputs[&3], physical);
-        assert!(!wirings[&1].inputs[&0].physical); // The other connection of the output is not.
+        assert_eq!(wirings[&3].inputs[&3], physical);
+        assert!(!wirings[&2].inputs[&0].physical); // The other connection of the output is not.
     }
 
     #[test]
@@ -241,7 +241,7 @@ pub(crate) mod tests {
         connections[1].delay = 10 * MS;
         assert_eq!(
             refusal(connections, nodes()),
-            "input port 3 of node 2 has a physical connection with a delay; it takes none"
+            "input port 3 of node 3 has a physical connection with a delay; it takes none"
         );
     }
 
@@ -253,28 +253,28 @@ pub(crate) mod tests {
     fn a_connection_to_a_port_that_does_not_exist_is_refused() {
         let mut connections = fan_out();
         connections[0].to.port_id = 5;
-        assert_eq!(refusal(connections, nodes()), "node 1 has no input port 5");
+        assert_eq!(refusal(connections, nodes()), "node 2 has no input port 5");
     }
 
     #[test]
     fn a_connection_goes_from_an_output_to_an_input() {
         let mut connections = fan_out();
         // Port 0 of the planner is an input.
-        connections.push(connection((1, 0), (2, 3)));
-        assert_eq!(refusal(connections, nodes()), "node 1 has no output port 0");
+        connections.push(connection((2, 0), (3, 3)));
+        assert_eq!(refusal(connections, nodes()), "node 2 has no output port 0");
     }
 
     #[test]
     fn a_connection_from_a_node_that_does_not_exist_is_refused() {
         let mut connections = fan_out();
-        connections.push(connection((7, 0), (2, 3)));
+        connections.push(connection((7, 0), (3, 3)));
         assert_eq!(refusal(connections, nodes()), "node 7 has no output port 0");
     }
 
     /// Set the logger's input to a serializer and a transport of its own.
     fn logger_on_msgpack_over_udp() -> BTreeMap<NodeId, RegisterNode> {
         let mut nodes = nodes();
-        let logger = &mut nodes.get_mut(&2).unwrap().inputs[0];
+        let logger = &mut nodes.get_mut(&3).unwrap().inputs[0];
         logger.serializer = "msgpack".to_string();
         logger.transport = "udp".to_string();
         nodes
@@ -284,31 +284,31 @@ pub(crate) mod tests {
     fn an_output_needs_the_serializer_its_input_uses() {
         assert_eq!(
             refusal(fan_out(), logger_on_msgpack_over_udp()),
-            "input port 3 of node 2 uses the serializer \"msgpack\", \
-             but output port 0 of node 0 has [\"bincode\"]"
+            "input port 3 of node 3 uses the serializer \"msgpack\", \
+             but output port 0 of node 1 has [\"bincode\"]"
         );
     }
 
     #[test]
     fn an_output_needs_the_transport_its_input_uses() {
         let mut nodes = logger_on_msgpack_over_udp();
-        let camera = &mut nodes.get_mut(&0).unwrap().outputs[0];
+        let camera = &mut nodes.get_mut(&1).unwrap().outputs[0];
         camera.serializers.push("msgpack".to_string());
         assert_eq!(
             refusal(fan_out(), nodes),
-            "input port 3 of node 2 uses the transport \"udp\", \
-             but output port 0 of node 0 has [\"tcp\"]"
+            "input port 3 of node 3 uses the transport \"udp\", \
+             but output port 0 of node 1 has [\"tcp\"]"
         );
     }
 
     #[test]
     fn each_connection_uses_the_serializer_and_transport_of_its_input() {
         let mut nodes = logger_on_msgpack_over_udp();
-        let camera = &mut nodes.get_mut(&0).unwrap().outputs[0];
+        let camera = &mut nodes.get_mut(&1).unwrap().outputs[0];
         camera.serializers.push("msgpack".to_string());
         camera.transports.push("udp".to_string());
         let wirings = graph(fan_out()).wire(&nodes).unwrap();
-        let used: Vec<_> = wirings[&0].outputs[&0]
+        let used: Vec<_> = wirings[&1].outputs[&0]
             .iter()
             .map(|downstream| &downstream.input)
             .map(|input| (input.serializer.as_str(), input.transport.as_str()))
@@ -320,17 +320,17 @@ pub(crate) mod tests {
     fn an_input_without_a_connection_is_refused() {
         assert_eq!(
             refusal(fan_out()[..1].to_vec(), nodes()),
-            "input port 3 of node 2 has no connection"
+            "input port 3 of node 3 has no connection"
         );
     }
 
     #[test]
     fn a_second_connection_to_an_input_is_refused() {
         let mut twice = fan_out();
-        twice.push(connection((1, 1), (2, 3)));
+        twice.push(connection((2, 1), (3, 3)));
         assert_eq!(
             refusal(twice, nodes()),
-            "input port 3 of node 2 has two connections; an input takes exactly one"
+            "input port 3 of node 3 has two connections; an input takes exactly one"
         );
     }
 }

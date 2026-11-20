@@ -1,14 +1,15 @@
 //! Launching an app: one process per node. The launcher reports what it sees to the
 //! coordinator, a ^C or the exit of a node's process, and the coordinator shuts the app down.
 
-use std::collections::HashMap;
-use std::process::{Child, Command};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::process::{Child, Command, ExitStatus};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::interrupt;
 use super::run::Assignment;
 use crate::coordinator::{self, CoordinatorHandle, Failure, Graph};
+use crate::node::NodeId;
 
 /// Start this program once for each node, wire the nodes through a coordinator, and wait
 /// until the app has ended. A node that fails ends the app.
@@ -21,18 +22,19 @@ pub(super) fn launch(graph: Graph) {
     // On ^C every node runs its shutdown function at once, and the app ends as it otherwise does.
     let interrupted = handle.clone();
     interrupt::on_interrupt(move || interrupted.shutdown_now());
-    let mut children: Vec<_> = (0..nodes)
+    // The coordinator is 0, so the ids of the nodes count from 1.
+    let mut children: BTreeMap<NodeId, Child> = (1..=nodes)
         .map(|node_id| {
             let assignment = Assignment {
                 node_id,
                 coordinator_endpoint: endpoint.clone(),
             };
             // The program's own arguments keep their positions.
-            Command::new(&exe)
+            let child = Command::new(&exe)
                 .args(&args)
                 .args(assignment.args())
-                .spawn()
-                .unwrap()
+                .spawn();
+            (node_id, child.unwrap())
         })
         .collect();
     report_exits(&mut children, &coordinator, &handle);
@@ -42,12 +44,12 @@ pub(super) fn launch(graph: Graph) {
     // The coordinator has given up on the nodes that went silent, so nothing waits for them.
     if let Err(Failure::Nodes { silent, .. }) = &outcome {
         for node_id in silent {
-            children[*node_id].kill().unwrap();
+            children.get_mut(node_id).unwrap().kill().unwrap();
         }
     }
-    let statuses: Vec<_> = children
+    let statuses: BTreeMap<NodeId, ExitStatus> = children
         .iter_mut()
-        .map(|child| child.wait().unwrap())
+        .map(|(node_id, child)| (*node_id, child.wait().unwrap()))
         .collect();
     match outcome {
         Err(Failure::Refused(refusal)) => panic!("{refusal}"),
@@ -55,12 +57,12 @@ pub(super) fn launch(graph: Graph) {
             panic!("node {} stopped responding", failed[0])
         }
         Err(Failure::Nodes { failed, .. }) => {
-            panic!("node {} exited with {}", failed[0], statuses[failed[0]])
+            panic!("node {} exited with {}", failed[0], statuses[&failed[0]])
         }
         Ok(()) => {
             // A node may still fail once the coordinator has seen it end.
-            if let Some(node_id) = statuses.iter().position(|status| !status.success()) {
-                panic!("node {node_id} exited with {}", statuses[node_id]);
+            if let Some((node_id, status)) = statuses.iter().find(|(_, status)| !status.success()) {
+                panic!("node {node_id} exited with {status}");
             }
         }
     }
@@ -68,18 +70,18 @@ pub(super) fn launch(graph: Graph) {
 
 /// Report the exit of each node's process to the coordinator, until it has ended the app.
 fn report_exits<T>(
-    children: &mut [Child],
+    children: &mut BTreeMap<NodeId, Child>,
     coordinator: &JoinHandle<T>,
     handle: &CoordinatorHandle,
 ) {
-    let mut reported = vec![false; children.len()];
+    let mut reported = BTreeSet::new();
     while !coordinator.is_finished() {
-        for (node_id, child) in children.iter_mut().enumerate() {
-            if !reported[node_id]
+        for (node_id, child) in children.iter_mut() {
+            if !reported.contains(node_id)
                 && let Some(status) = child.try_wait().unwrap()
             {
-                handle.node_exited(node_id, status.success());
-                reported[node_id] = true;
+                handle.node_exited(*node_id, status.success());
+                reported.insert(*node_id);
             }
         }
         // The launcher only looks on, so it need not see an exit the moment it happens.

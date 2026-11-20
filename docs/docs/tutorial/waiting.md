@@ -57,13 +57,11 @@ raio.run(sender, listener)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {44}
+```rust title="src/main.rs" {46}
 use futures::future::{Either, select};
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::S;
 use std::pin::pin;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Sender {
@@ -71,6 +69,7 @@ struct Sender {
     out: OutputPort<String>,
 }
 
+#[node]
 impl Sender {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -79,7 +78,8 @@ impl Sender {
         }
     }
 
-    async fn send(self: Rc<Self>) {
+    #[task]
+    async fn send(&self) {
         self.node.wait(2 * S).await;
         self.out.set("hello".to_string());
     }
@@ -91,6 +91,7 @@ struct Listener {
     inp: InputPort<String>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -99,7 +100,8 @@ impl Listener {
         }
     }
 
-    async fn listen(self: Rc<Self>) {
+    #[task]
+    async fn listen(&self) {
         for limit in [1 * S, 5 * S] {
             match select(self.inp.wait(), pin!(self.node.wait(limit))).await {
                 Either::Left((value, _)) => {
@@ -113,8 +115,8 @@ impl Listener {
 
 fn main() {
     let mut app = App::new();
-    let sender = app.create_node(Sender::new, tasks![Sender::send]);
-    let listener = app.create_node(Listener::new, tasks![Listener::listen]);
+    let sender = app.create_node(Sender::new);
+    let listener = app.create_node(Listener::new);
     app.connect(&sender.out, &listener.inp);
     app.run();
 }
@@ -203,13 +205,11 @@ raio.run(sender, listener)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {43}
+```rust title="src/main.rs" {44}
 use futures::future::{Either, select};
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::{S, Time};
 use std::pin::pin;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Sender {
@@ -217,6 +217,7 @@ struct Sender {
     out: OutputPort<String>,
 }
 
+#[node]
 impl Sender {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -225,7 +226,8 @@ impl Sender {
         }
     }
 
-    async fn send(self: Rc<Self>) {
+    #[task]
+    async fn send(&self) {
         self.node.wait(2 * S).await;
         self.out.set("hello".to_string());
     }
@@ -237,6 +239,7 @@ struct Listener {
     inp: InputPort<String>,
 }
 
+#[node]
 impl Listener {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -252,7 +255,8 @@ impl Listener {
         }
     }
 
-    async fn listen(self: Rc<Self>) {
+    #[task]
+    async fn listen(&self) {
         if self.next_within(1 * S).await.is_none() {
             println!("{}: nothing yet", self.node.now());
         }
@@ -263,8 +267,8 @@ impl Listener {
 
 fn main() {
     let mut app = App::new();
-    let sender = app.create_node(Sender::new, tasks![Sender::send]);
-    let listener = app.create_node(Listener::new, tasks![Listener::listen]);
+    let sender = app.create_node(Sender::new);
+    let listener = app.create_node(Listener::new);
     app.connect(&sender.out, &listener.inp);
     app.run();
 }
@@ -333,10 +337,9 @@ raio.run(Worker())
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {27,30}
+```rust title="src/main.rs" {28,31}
 use futures::join;
-use raio::app::{App, Builder, Node, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, Node, Ports, node};
 use raio::time::{S, Time};
 use std::rc::Rc;
 
@@ -345,6 +348,7 @@ struct Worker {
     node: Node,
 }
 
+#[node]
 impl Worker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -357,6 +361,7 @@ impl Worker {
         format!("{name} done at {}", self.node.now())
     }
 
+    #[task]
     async fn work(self: Rc<Self>) {
         println!(
             "{:?}",
@@ -374,7 +379,7 @@ impl Worker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Worker::new, tasks![Worker::work]);
+    app.create_node(Worker::new);
     app.run();
 }
 ```

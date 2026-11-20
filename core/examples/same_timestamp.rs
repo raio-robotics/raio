@@ -1,7 +1,5 @@
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::{MS, S, Time};
-use std::rc::Rc;
 
 // Both tasks must finish before the node sends the timestamp's output.
 
@@ -9,19 +7,25 @@ use std::rc::Rc;
 struct Ticker {
     node: Node,
     out: OutputPort<i64>,
+    period: Time,
+    ticks: i64,
 }
 
+#[node]
 impl Ticker {
-    fn new(builder: &mut Builder) -> Self {
+    fn new(builder: &mut Builder, period: Time, ticks: i64) -> Self {
         Self {
             node: builder.node(),
             out: builder.output(),
+            period,
+            ticks,
         }
     }
 
-    async fn start(self: Rc<Self>, period: Time, ticks: i64) {
-        for i in 0..ticks {
-            self.node.wait(period).await;
+    #[task]
+    async fn start(&self) {
+        for i in 0..self.ticks {
+            self.node.wait(self.period).await;
             self.out.set(i);
         }
     }
@@ -34,6 +38,7 @@ struct Worker {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Worker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -43,11 +48,13 @@ impl Worker {
         }
     }
 
-    async fn consume(self: Rc<Self>) {
+    #[task]
+    async fn consume(&self) {
         while self.input.wait().await.is_some() {}
     }
 
-    async fn produce(self: Rc<Self>) {
+    #[task]
+    async fn produce(&self) {
         let now = self.node.wait(700 * MS).await;
         println!("worker sets 7 at {now}");
         self.out.set(7);
@@ -59,6 +66,7 @@ struct Sink {
     input: InputPort<i64>,
 }
 
+#[node]
 impl Sink {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -66,7 +74,8 @@ impl Sink {
         }
     }
 
-    async fn start(self: Rc<Self>) {
+    #[task]
+    async fn start(&self) {
         while let Some((value, timestamp)) = self.input.wait().await {
             println!("sink got {} at {timestamp}", *value);
         }
@@ -75,12 +84,9 @@ impl Sink {
 
 fn main() {
     let mut app = App::new();
-    let ticker = app.create_node(
-        Ticker::new,
-        tasks![|ticker: Rc<Ticker>| ticker.start(1 * S, 2)],
-    );
-    let worker = app.create_node(Worker::new, tasks![Worker::consume, Worker::produce]);
-    let sink = app.create_node(Sink::new, tasks![Sink::start]);
+    let ticker = app.create_node(|builder| Ticker::new(builder, 1 * S, 2));
+    let worker = app.create_node(Worker::new);
+    let sink = app.create_node(Sink::new);
     app.connect(&ticker.out, &worker.input);
     app.connect(&worker.out, &sink.input);
     app.run();

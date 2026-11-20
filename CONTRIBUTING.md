@@ -13,7 +13,7 @@ core/src
   transport/     carrying bytes between processes
   runtime/       the single-threaded executor under each node
   driver/        its I/O and timers
-core/macros     the `Ports` derive macro, a separate crate as Rust requires of procedural macros
+core/macros     the `Ports` derive macro and the `#[node]` attribute, a separate crate as Rust requires
 python
   src/           the Rust half of the binding: Python coroutines run as raio tasks
   python/raio/   the Python half: Node, ports, connect, run

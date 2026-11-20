@@ -61,12 +61,9 @@ raio.run(fast, slow, merge)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {50,54-57}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {49,54-57}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::{MS, S, Time};
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
@@ -76,6 +73,7 @@ struct Ticker {
     ticks: i64,
 }
 
+#[node]
 impl Ticker {
     fn new(builder: &mut Builder, period: Time, ticks: i64) -> Self {
         Self {
@@ -86,7 +84,8 @@ impl Ticker {
         }
     }
 
-    async fn tick(self: Rc<Self>) {
+    #[task]
+    async fn tick(&self) {
         for count in 0..self.ticks {
             self.node.wait(self.period).await;
             self.out.set(count);
@@ -101,6 +100,7 @@ struct Merge {
     slow: InputPort<i64>,
 }
 
+#[node]
 impl Merge {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -110,31 +110,24 @@ impl Merge {
         }
     }
 
-    async fn merge(self: Rc<Self>) {
-        reaction!(self, [fast, slow], {
-            println!(
-                "{}: fast {:?} ({}), slow {:?} ({})",
-                self.node.now(),
-                self.fast.latest().map(|(value, _)| *value),
-                self.fast.get().is_some(),
-                self.slow.latest().map(|(value, _)| *value),
-                self.slow.get().is_some(),
-            );
-        });
+    #[reaction(fast, slow)]
+    fn merge(&self) {
+        println!(
+            "{}: fast {:?} ({}), slow {:?} ({})",
+            self.node.now(),
+            self.fast.latest().map(|(value, _)| *value),
+            self.fast.get().is_some(),
+            self.slow.latest().map(|(value, _)| *value),
+            self.slow.get().is_some(),
+        );
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let fast = app.create_node(
-        |builder| Ticker::new(builder, 500 * MS, 4),
-        tasks![Ticker::tick],
-    );
-    let slow = app.create_node(
-        |builder| Ticker::new(builder, 1 * S, 2),
-        tasks![Ticker::tick],
-    );
-    let merge = app.create_node(Merge::new, tasks![Merge::merge]);
+    let fast = app.create_node(|builder| Ticker::new(builder, 500 * MS, 4));
+    let slow = app.create_node(|builder| Ticker::new(builder, 1 * S, 2));
+    let merge = app.create_node(Merge::new);
     app.connect(&fast.out, &merge.fast);
     app.connect(&slow.out, &merge.slow);
     app.run();
@@ -210,13 +203,10 @@ raio.run(sender, counter)
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {58}
-use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports};
-use raio::reaction;
-use raio::tasks;
+```rust title="src/main.rs" {42,47}
+use raio::app::{App, Builder, InputPort, Node, OutputPort, Ports, node};
 use raio::time::MS;
 use std::cell::Cell;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Sender {
@@ -224,6 +214,7 @@ struct Sender {
     out: OutputPort<i64>,
 }
 
+#[node]
 impl Sender {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -232,7 +223,8 @@ impl Sender {
         }
     }
 
-    async fn send(self: Rc<Self>) {
+    #[task]
+    async fn send(&self) {
         self.node.wait(1 * MS).await;
         self.out.set(1);
     }
@@ -244,6 +236,7 @@ struct Counter {
     total: Cell<i64>,
 }
 
+#[node]
 impl Counter {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -252,23 +245,21 @@ impl Counter {
         }
     }
 
-    async fn add(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            self.total.set(self.total.get() + *self.inp.get().unwrap());
-        });
+    #[reaction(inp)]
+    fn add(&self) {
+        self.total.set(self.total.get() + *self.inp.get().unwrap());
     }
 
-    async fn show(self: Rc<Self>) {
-        reaction!(self, [inp], {
-            println!("total is {}", self.total.get());
-        });
+    #[reaction(inp)]
+    fn show(&self) {
+        println!("total is {}", self.total.get());
     }
 }
 
 fn main() {
     let mut app = App::new();
-    let sender = app.create_node(Sender::new, tasks![Sender::send]);
-    let counter = app.create_node(Counter::new, tasks![Counter::add, Counter::show]);
+    let sender = app.create_node(Sender::new);
+    let counter = app.create_node(Counter::new);
     app.connect(&sender.out, &counter.inp);
     app.run();
 }
@@ -300,7 +291,7 @@ Reactions that are triggered at the same timestamp run one after another, in the
 </Python>
 <Rust>
 
-Reactions that are triggered at the same timestamp run one after another, in the order in which **`tasks![...]`** lists them. Here `add` runs before `show`, so `show` always sees the updated total.
+Reactions that are triggered at the same timestamp run one after another, in the order in which the `#[node]` block declares them. Here `add` runs before `show`, so `show` always sees the updated total.
 
 </Rust>
 
@@ -318,15 +309,15 @@ A reaction ends when every one of its triggers has closed.
 
 A task can read the same port as a reaction, with `async for value in port`. Both then see every value: the task's loop and the reaction each run at the timestamp of the value, in the order in which they are declared.
 
+</Python>
+<Rust>
+
+A task can read the same port as a reaction, with `port.wait().await`, which returns the next value. Both then see every value: the task and the reaction each run at the timestamp of the value, in the order in which they are declared.
+
+</Rust>
+
 :::note
 
 A reaction may be an `async` method and wait inside its body. While it waits, it does not run for the values that arrive. A reaction that must see every value returns without waiting.
 
 :::
-
-</Python>
-<Rust>
-
-In Rust a reaction is part of a task: `reaction!` is a loop that the task runs until its triggers have closed. A task can also read a port directly, with `port.wait().await`, which returns the next value.
-
-</Rust>

@@ -38,7 +38,7 @@ Run one with `cargo run --example <name>`.
 | [`hello.rs`](https://github.com/raio-robotics/raio/blob/main/core/examples/hello.rs) | Two nodes and one connection. |
 | [`timer.rs`](https://github.com/raio-robotics/raio/blob/main/core/examples/timer.rs) | A timer made of `node.wait` in a loop. |
 | [`reaction.rs`](https://github.com/raio-robotics/raio/blob/main/core/examples/reaction.rs) | One reaction triggered by two ports. |
-| [`reaction_order.rs`](https://github.com/raio-robotics/raio/blob/main/core/examples/reaction_order.rs) | Reactions run in the order they are listed. |
+| [`reaction_order.rs`](https://github.com/raio-robotics/raio/blob/main/core/examples/reaction_order.rs) | Reactions run in the order in which they are declared. |
 | [`select.rs`](https://github.com/raio-robotics/raio/blob/main/core/examples/select.rs) | A task that waits for the first of two ports. |
 | [`sync.rs`](https://github.com/raio-robotics/raio/blob/main/core/examples/sync.rs) | Pairing the values of two ports that share a timestamp. |
 | [`join.rs`](https://github.com/raio-robotics/raio/blob/main/core/examples/join.rs) | Two tasks of one node at different rates. |

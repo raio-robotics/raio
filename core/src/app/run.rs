@@ -9,7 +9,7 @@ use std::rc::Rc;
 use super::builder::{Builder, Ports};
 use super::connection::connect_node;
 use crate::coordinator::Link;
-use crate::diagram::DiagramNode;
+use crate::diagram::{DiagramNode, DiagramTask};
 use crate::node::{NodeId, NodeScheduler};
 use crate::runtime::{BoxFuture, Runtime};
 
@@ -30,24 +30,58 @@ impl Runner {
     }
 }
 
-/// One task of a node: its name, and what starts it, which takes the node and returns the
-/// task's future.
+/// One task or reaction of a node: its name, the triggers of a reaction, and what starts it,
+/// which takes the node and returns the future that runs it.
 pub struct Start<N> {
     name: &'static str,
+    /// The fields that hold the triggers of a reaction; `None` for a task.
+    triggers: Option<&'static [&'static str]>,
     start: Box<dyn FnOnce(Rc<N>) -> BoxFuture<()>>,
 }
 
 impl<N> Start<N> {
-    pub fn new(
+    pub fn task(
         name: &'static str,
         start: impl FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>> + 'static,
     ) -> Self {
         Self {
             name,
+            triggers: None,
+            start: Box::new(start),
+        }
+    }
+
+    /// A reaction; its future waits for its triggers and runs the reaction's body.
+    pub fn reaction(
+        name: &'static str,
+        triggers: &'static [&'static str],
+        start: impl FnOnce(Rc<N>) -> Pin<Box<dyn Future<Output = ()>>> + 'static,
+    ) -> Self {
+        Self {
+            name,
+            triggers: Some(triggers),
             start: Box::new(start),
         }
     }
 }
+
+/// What a node declares in its `#[node]` block, which implements this trait: its tasks and
+/// reactions, and its shutdown function.
+pub trait Tasks: Sized {
+    /// The tasks and reactions of the node, in the order in which it declares them.
+    fn starts(&self) -> Vec<Start<Self>> {
+        Vec::new()
+    }
+
+    /// Run once when the node shuts down: at the timestamp at which the app shuts down, where
+    /// nothing else runs, or at the node's last timestamp when it finishes on its own.
+    fn on_shutdown(&self) {}
+}
+
+/// A port that is a node by itself has nothing to run.
+impl<T> Tasks for super::InputPort<T> {}
+impl<T> Tasks for super::OutputPort<T> {}
+impl<T> Tasks for super::Action<T> {}
 
 /// A node's place in an app, as its launcher assigned it.
 pub struct Assignment {
@@ -103,7 +137,6 @@ impl Assignment {
 /// A node that is built and not yet running.
 pub struct CreatedNode<N> {
     node: Rc<N>,
-    scheduler: Rc<NodeScheduler>,
     pub(super) runner: Runner,
 }
 
@@ -124,21 +157,22 @@ fn short(type_name: &str) -> String {
     kept.chain([last]).collect()
 }
 
-/// Name a task after the function that `tasks!` was given for it, without the function's path.
-fn task_name(expression: &str) -> &str {
-    let name = expression.rsplit("::").next().unwrap();
-    let is_name = |c: char| c.is_alphanumeric() || c == '_';
-    match name.chars().all(is_name) {
-        true => name,
-        false => "task",
-    }
-}
-
 impl<N: 'static> CreatedNode<N> {
-    pub(super) fn new(
+    /// Build a node with the tasks, reactions and shutdown function that it declares.
+    pub(super) fn new(node_id: NodeId, constructor: impl FnOnce(&mut Builder) -> N) -> Self
+    where
+        N: Ports + Tasks,
+    {
+        Self::with_starts(node_id, constructor, N::starts, N::on_shutdown)
+    }
+
+    /// Build a node with given tasks and shutdown function. `starts` lists the tasks and
+    /// reactions of the built node.
+    fn with_starts(
         node_id: NodeId,
         constructor: impl FnOnce(&mut Builder) -> N,
-        tasks: Vec<Start<N>>,
+        starts: impl FnOnce(&N) -> Vec<Start<N>>,
+        shutdown: impl FnOnce(&N) + 'static,
     ) -> Self
     where
         N: Ports,
@@ -147,19 +181,32 @@ impl<N: 'static> CreatedNode<N> {
         let scheduler = Rc::new(NodeScheduler::new(runtime.clone()));
         let mut builder = Builder::new(node_id, scheduler.clone());
         let node = Rc::new(constructor(&mut builder));
+        let tasks = starts(&node);
+        let names = node.names();
         let mut ports = builder.ports.clone();
-        for (position, name) in node.names() {
-            ports[position].0 = name.to_string();
+        for (position, name) in &names {
+            ports[*position].0 = name.to_string();
         }
+        // A trigger is named by the field that holds it; a diagram takes its position.
+        let position = |field: &str| {
+            let port = names.iter().find(|(_, name)| *name == field);
+            port.unwrap_or_else(|| panic!("the trigger `{field}` is not a port of the node"))
+                .0
+        };
+        let shown = tasks.iter().map(|task| DiagramTask {
+            name: task.name.to_string(),
+            triggers: task
+                .triggers
+                .map(|fields| fields.iter().map(|field| position(field)).collect()),
+        });
         let diagram = DiagramNode {
             name: short(std::any::type_name::<N>()),
             ports,
-            tasks: tasks
-                .iter()
-                .map(|task| task_name(task.name).to_string())
-                .collect(),
+            tasks: shown.collect(),
         };
-        let (running, handle) = (node.clone(), scheduler.clone());
+        let stopping = node.clone();
+        *scheduler.shutdown_function.borrow_mut() = Some(Box::new(move || shutdown(&stopping)));
+        let running = node.clone();
         // Wire the node through the coordinator and run it until it finishes.
         let run = move |link: Link| {
             for task in builder.internal_tasks {
@@ -178,30 +225,20 @@ impl<N: 'static> CreatedNode<N> {
         };
         Self {
             node,
-            scheduler: handle,
             runner: Runner {
                 run: Rc::new(RefCell::new(Some(Box::new(run)))),
                 diagram,
             },
         }
     }
-
-    /// Run this function once when the node shuts down: at the timestamp at which the app shuts
-    /// down, where nothing else runs, or at the node's last timestamp when it finishes on its own.
-    pub fn on_shutdown(self, shutdown: impl FnOnce(&N) + 'static) -> Self {
-        let node = self.node.clone();
-        *self.scheduler.shutdown_function.borrow_mut() = Some(Box::new(move || shutdown(&node)));
-        self
-    }
 }
 
 /// Build the node that this program runs; set its ports before `run_node`.
-pub fn create_node<N: Ports + 'static>(
+pub fn create_node<N: Ports + Tasks + 'static>(
     constructor: impl FnOnce(&mut Builder) -> N,
-    tasks: Vec<Start<N>>,
 ) -> CreatedNode<N> {
     // The node's id comes with its assignment; its ports do not use it.
-    CreatedNode::new(0, constructor, tasks)
+    CreatedNode::new(0, constructor)
 }
 
 /// Run the node as this program's launcher assigned it, until it finishes.
@@ -229,18 +266,6 @@ pub fn run_node_on<N: 'static>(link: Link, node: CreatedNode<N>) {
     node.runner.run(link);
 }
 
-/// Package async node methods as startup tasks for `create_node`; each task is named after its
-/// method.
-#[macro_export]
-macro_rules! tasks {
-    ($($start:expr),+ $(,)?) => {
-        vec![$($crate::app::Start::new(
-            stringify!($start),
-            move |node| Box::pin($start(node)),
-        )),+]
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -260,7 +285,16 @@ mod tests {
     impl<A, B> Ports for (A, B) {}
     impl Ports for Node {}
 
-    /// Start a coordinator for a source, node 0, that feeds a sink, node 1; return what assigns
+    /// Build a node from tasks and a shutdown function that the test gives it.
+    fn node_with<N: Ports + 'static>(
+        constructor: impl FnOnce(&mut Builder) -> N,
+        starts: Vec<Start<N>>,
+        shutdown: impl FnOnce(&N) + 'static,
+    ) -> CreatedNode<N> {
+        CreatedNode::with_starts(0, constructor, |_| starts, shutdown)
+    }
+
+    /// Start a coordinator for a source, node 1, that feeds a sink, node 2; return what assigns
     /// each node its place, and the coordinator's thread.
     fn pair() -> (
         impl Fn(NodeId) -> Assignment,
@@ -273,8 +307,8 @@ mod tests {
         let graph = Graph {
             nodes: 2,
             connections: vec![Connection {
-                from: port(0),
-                to: port(1),
+                from: port(1),
+                to: port(2),
                 delay: Time::ZERO,
                 physical: false,
             }],
@@ -291,27 +325,31 @@ mod tests {
     fn a_connection_uses_the_serializer_and_transport_its_ports_were_set_to() {
         let (assign, coordinator) = pair();
 
-        let assignment = assign(0);
+        let assignment = assign(1);
         let source = std::thread::spawn(move || {
-            let start = Start::<(Node, OutputPort<i64>)>::new("start", |source| {
+            let start = Start::<(Node, OutputPort<i64>)>::task("start", |source| {
                 Box::pin(async move {
                     source.0.wait(1 * MS).await;
                     source.1.set(7);
                 })
             });
-            let source = create_node(|builder| (builder.node(), builder.output()), vec![start]);
+            let source = node_with(
+                |builder| (builder.node(), builder.output()),
+                vec![start],
+                |_| {},
+            );
             source.1.set_serializer(Decimal);
             source.1.set_transport(Loopback);
             run_node_as(assignment, source);
         });
-        let assignment = assign(1);
+        let assignment = assign(2);
         let sink = std::thread::spawn(move || {
             let received = Rc::new(std::cell::Cell::new(None));
             let seen = received.clone();
-            let start = Start::<InputPort<i64>>::new("start", move |input| {
+            let start = Start::<InputPort<i64>>::task("start", move |input| {
                 Box::pin(async move { seen.set(input.wait().await.map(|(value, _)| *value)) })
             });
-            let sink = create_node(|builder| builder.input(), vec![start]);
+            let sink = node_with(|builder| builder.input(), vec![start], |_| {});
             sink.set_serializer(Decimal);
             sink.set_transport(Loopback);
             run_node_as(assignment, sink);
@@ -326,9 +364,9 @@ mod tests {
     fn every_node_shuts_down_at_one_timestamp_and_gets_what_was_sent_before_it() {
         let (assign, coordinator) = pair();
 
-        let assignment = assign(0);
+        let assignment = assign(1);
         let source = std::thread::spawn(move || {
-            let start = Start::<(Node, OutputPort<i64>)>::new("start", |source| {
+            let start = Start::<(Node, OutputPort<i64>)>::task("start", |source| {
                 Box::pin(async move {
                     // This task never ends on its own.
                     let mut count = 0;
@@ -341,16 +379,19 @@ mod tests {
             });
             let stopped = Rc::new(std::cell::Cell::new(None));
             let at = stopped.clone();
-            let source = create_node(|builder| (builder.node(), builder.output()), vec![start])
-                .on_shutdown(move |source| at.set(Some(source.0.now())));
+            let source = node_with(
+                |builder| (builder.node(), builder.output()),
+                vec![start],
+                move |source| at.set(Some(source.0.now())),
+            );
             run_node_as(assignment, source);
             stopped.get()
         });
-        let assignment = assign(1);
+        let assignment = assign(2);
         let sink = std::thread::spawn(move || {
             let received = Rc::new(RefCell::new(Vec::new()));
             let seen = received.clone();
-            let start = Start::<(Node, InputPort<i64>)>::new("start", move |sink| {
+            let start = Start::<(Node, InputPort<i64>)>::task("start", move |sink| {
                 Box::pin(async move {
                     while let Some((value, timestamp)) = sink.1.wait().await {
                         seen.borrow_mut().push(timestamp);
@@ -362,8 +403,11 @@ mod tests {
             });
             let stopped = Rc::new(std::cell::Cell::new(None));
             let at = stopped.clone();
-            let sink = create_node(|builder| (builder.node(), builder.input()), vec![start])
-                .on_shutdown(move |sink| at.set(Some(sink.0.now())));
+            let sink = node_with(
+                |builder| (builder.node(), builder.input()),
+                vec![start],
+                move |sink| at.set(Some(sink.0.now())),
+            );
             run_node_as(assignment, sink);
             (received.take(), stopped.get())
         });
@@ -405,7 +449,7 @@ mod tests {
             })
         });
         let assignment = Assignment {
-            node_id: 0,
+            node_id: 1,
             coordinator_endpoint: announced.recv().unwrap(),
         };
         (assignment, coordinator)
@@ -416,14 +460,17 @@ mod tests {
     fn waiting_node() -> (CreatedNode<Node>, [Rc<std::cell::Cell<bool>>; 2]) {
         let flags = [(); 2].map(|_| Rc::new(std::cell::Cell::new(false)));
         let [started, shut_down] = flags.clone();
-        let start = Start::<Node>::new("start", move |node| {
+        let start = Start::<Node>::task("start", move |node| {
             Box::pin(async move {
                 started.set(true);
                 node.wait(HOUR).await;
             })
         });
-        let node = create_node(|builder| builder.node(), vec![start])
-            .on_shutdown(move |_| shut_down.set(true));
+        let node = node_with(
+            |builder| builder.node(),
+            vec![start],
+            move |_| shut_down.set(true),
+        );
         (node, flags)
     }
 
@@ -448,8 +495,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a launcher starts it with --node_id and --coordinator_endpoint")]
     fn a_node_program_started_by_hand_says_what_it_needs() {
-        let node: CreatedNode<OutputPort<i64>> =
-            create_node(|builder| builder.output(), Vec::new());
+        let node: CreatedNode<OutputPort<i64>> = create_node(|builder| builder.output());
         run_node(node);
     }
 
@@ -458,15 +504,6 @@ mod tests {
         assert_eq!(short("hello::Producer"), "Producer");
         let pair = "(raio::node::Node, raio::app::port::OutputPort<i64>)";
         assert_eq!(short(pair), "(Node, OutputPort<i64>)");
-    }
-
-    #[test]
-    fn a_task_is_named_after_its_method_if_it_has_one() {
-        assert_eq!(task_name("Producer::start"), "start");
-        assert_eq!(
-            task_name("|ticker: Rc<Ticker>| ticker.start(period)"),
-            "task"
-        );
     }
 
     fn program(args: &[&str]) -> Vec<String> {

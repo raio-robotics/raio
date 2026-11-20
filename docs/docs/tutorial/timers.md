@@ -77,16 +77,15 @@ raio.run(Ticker())
 <Rust>
 
 ```rust title="src/main.rs" {20}
-use raio::app::{App, Builder, Node, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, Node, Ports, node};
 use raio::time::S;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
     node: Node,
 }
 
+#[node]
 impl Ticker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -94,7 +93,8 @@ impl Ticker {
         }
     }
 
-    async fn tick(self: Rc<Self>) {
+    #[task]
+    async fn tick(&self) {
         for count in 0..3 {
             let now = self.node.wait(1 * S).await;
             println!("tick {count} at {now}");
@@ -104,7 +104,7 @@ impl Ticker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Ticker::new, tasks![Ticker::tick]);
+    app.create_node(Ticker::new);
     app.run();
 }
 ```
@@ -162,10 +162,8 @@ raio.run(Ticker())
 <Rust>
 
 ```rust title="src/main.rs" {23}
-use raio::app::{App, Builder, Node, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, Node, Ports, node};
 use raio::time::MS;
-use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
@@ -174,6 +172,7 @@ struct Ticker {
     node: Node,
 }
 
+#[node]
 impl Ticker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -181,7 +180,8 @@ impl Ticker {
         }
     }
 
-    async fn tick(self: Rc<Self>) {
+    #[task]
+    async fn tick(&self) {
         for _ in 0..3 {
             let now = self.node.wait(200 * MS).await;
             thread::sleep(Duration::from_millis(300));
@@ -196,7 +196,7 @@ impl Ticker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Ticker::new, tasks![Ticker::tick]);
+    app.create_node(Ticker::new);
     app.run();
 }
 ```
@@ -264,16 +264,15 @@ raio.run(Ticker())
 <Rust>
 
 ```rust title="src/main.rs" {21}
-use raio::app::{App, Builder, Node, Ports};
-use raio::tasks;
+use raio::app::{App, Builder, Node, Ports, node};
 use raio::time::S;
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Ticker {
     node: Node,
 }
 
+#[node]
 impl Ticker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -281,7 +280,8 @@ impl Ticker {
         }
     }
 
-    async fn tick(self: Rc<Self>) {
+    #[task]
+    async fn tick(&self) {
         for _ in 0..3 {
             self.node.wait(1 * S).await;
             let lag = self.node.physical_now() - self.node.now();
@@ -292,7 +292,7 @@ impl Ticker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Ticker::new, tasks![Ticker::tick]);
+    app.create_node(Ticker::new);
     app.run();
 }
 ```
@@ -353,17 +353,16 @@ raio.run(Worker())
 </Python>
 <Rust>
 
-```rust title="src/main.rs" {35}
-use raio::app::{App, Builder, Node, Ports};
-use raio::tasks;
+```rust title="src/main.rs" {17,25}
+use raio::app::{App, Builder, Node, Ports, node};
 use raio::time::{MS, S};
-use std::rc::Rc;
 
 #[derive(Ports)]
 struct Worker {
     node: Node,
 }
 
+#[node]
 impl Worker {
     fn new(builder: &mut Builder) -> Self {
         Self {
@@ -371,14 +370,16 @@ impl Worker {
         }
     }
 
-    async fn fast(self: Rc<Self>) {
+    #[task]
+    async fn fast(&self) {
         for count in 0..4 {
             self.node.wait(500 * MS).await;
             println!("fast {count} at {}", self.node.now());
         }
     }
 
-    async fn slow(self: Rc<Self>) {
+    #[task]
+    async fn slow(&self) {
         for count in 0..2 {
             self.node.wait(1 * S).await;
             println!("slow {count} at {}", self.node.now());
@@ -388,7 +389,7 @@ impl Worker {
 
 fn main() {
     let mut app = App::new();
-    app.create_node(Worker::new, tasks![Worker::fast, Worker::slow]);
+    app.create_node(Worker::new);
     app.run();
 }
 ```
