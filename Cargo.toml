@@ -4,7 +4,7 @@ members = ["core", "core/macros", "python"]
 default-members = ["core"]
 
 [workspace.package]
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/raio-robotics/raio"

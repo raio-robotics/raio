@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "raio-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "raio-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pyo3",
  "raio-rs",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "raio-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-io",
  "bincode",
