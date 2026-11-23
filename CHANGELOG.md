@@ -1,0 +1,56 @@
+# Changelog
+
+## [0.2.0](https://github.com/raio-robotics/raio/compare/v0.1.0...v0.2.0) (2026-11-23)
+
+
+### Features
+
+* ^C shutdown ([82608a4](https://github.com/raio-robotics/raio/commit/82608a461c1cb32c4afa7e99cf147d939fd20622))
+* action ([efab0e7](https://github.com/raio-robotics/raio/commit/efab0e77358c876bbd9ff13c211a5fd85500f9b5))
+* benchmark and start stat ([9dc9e54](https://github.com/raio-robotics/raio/commit/9dc9e545819f991d74ab87ebf56d2b2b736a6eb5))
+* change rust reaction api to macro ([0f66109](https://github.com/raio-robotics/raio/commit/0f66109b11faad2305ae27c5af04081f73f82233))
+* coordinator ([9157351](https://github.com/raio-robotics/raio/commit/9157351f2b7511b854408e15c8e1701b35e37f92))
+* diagram ([27ac326](https://github.com/raio-robotics/raio/commit/27ac32624118ecce8b1d6c7ecbff8387ee918fdd))
+* driver ([3740f53](https://github.com/raio-robotics/raio/commit/3740f53896854e4f42f95cf75b6379dba7820166))
+* e2e tests ([e7955e6](https://github.com/raio-robotics/raio/commit/e7955e6de896cb945c1eb7afc23ac2676d817118))
+* ent to single value ([8f6a4fb](https://github.com/raio-robotics/raio/commit/8f6a4fbfecdb331c60cf64cfab96b39d866f6be6))
+* EventSource ([dd5d262](https://github.com/raio-robotics/raio/commit/dd5d2623a7d7b23621bda7927174d8435e4bdcb1))
+* executor ([033c55f](https://github.com/raio-robotics/raio/commit/033c55f901c8b64925f753d7239fd0597b5997b1))
+* foreign futures ([37421c3](https://github.com/raio-robotics/raio/commit/37421c3071f313a8b689809d1d7da02ee9208a59))
+* join! and fix timers ([9a4a52a](https://github.com/raio-robotics/raio/commit/9a4a52ac587a81babe6dd7c7d165111416b511b4))
+* logcial_time in runtime ([56be115](https://github.com/raio-robotics/raio/commit/56be115d4e28d36ed0bbb25803aaf2fede90cc38))
+* multi-process runtime ([a691c26](https://github.com/raio-robotics/raio/commit/a691c2628b930829a1d930709b98d1a4d0f5533d))
+* node stat and ent ([eb37591](https://github.com/raio-robotics/raio/commit/eb37591ffb7d8b76deab0377ee4bdb703e4e0e71))
+* output ports and connections ([e0d57e1](https://github.com/raio-robotics/raio/commit/e0d57e11fdc634f1e048764a1d29b64df1aebc3a))
+* physicall connections ([9013532](https://github.com/raio-robotics/raio/commit/9013532788ec0405550b826783d01c954c8b6f6f))
+* physicall connections as dashed lines ([fc0b113](https://github.com/raio-robotics/raio/commit/fc0b11310d7912d31e93d1e60af6737382b55f00))
+* port.wait() ([398b498](https://github.com/raio-robotics/raio/commit/398b4987957028becaa80658ffdd4526ba905f10))
+* ports ([ab242e7](https://github.com/raio-robotics/raio/commit/ab242e7fe8b3836577224c0d50f39b76e6b7506e))
+* **py:** action ([05838c9](https://github.com/raio-robotics/raio/commit/05838c983f1f7a034b228a850633cc674f2951e0))
+* **py:** reaction ([2aab254](https://github.com/raio-robotics/raio/commit/2aab2541b5c42a38cd808abc47e0c0bfc566520f))
+* **py:** serializer selection ([3209eee](https://github.com/raio-robotics/raio/commit/3209eee59582cbee44a865919a73bace90bb30b9))
+* **py:** shutdown ([4c3d2f7](https://github.com/raio-robotics/raio/commit/4c3d2f7b221884dfd8c36b00273ece6b6bb5857b))
+* python and rust polyglot apps ([e78de40](https://github.com/raio-robotics/raio/commit/e78de402ac90542c5d14649f49f1a05d817e9f5c))
+* python combinators ([1cbc4af](https://github.com/raio-robotics/raio/commit/1cbc4af3bb5a31553d8b5985110ada469fe6842b))
+* raio-py ([bac7d48](https://github.com/raio-robotics/raio/commit/bac7d48cb97bdbbf1bfe96ff32fca7cc13733100))
+* reaction ([b79609c](https://github.com/raio-robotics/raio/commit/b79609c1cf2c4be7aaa2446555fe1cb7df90391d))
+* remove diagram names ([5efb285](https://github.com/raio-robotics/raio/commit/5efb2859d11d3a6795c8ce4794878e434b152979))
+* request_shutdown ([b5cbb1d](https://github.com/raio-robotics/raio/commit/b5cbb1d08430012ce6503658d0d34688b615ca44))
+* select! primitive ([3170d3d](https://github.com/raio-robotics/raio/commit/3170d3d09c7177040ed38b34b34944824e713eb7))
+* serializer ([558dfb4](https://github.com/raio-robotics/raio/commit/558dfb427388824cf15ac1d26c699eda8d8b86d9))
+* standalone nodes ([ae2ab5e](https://github.com/raio-robotics/raio/commit/ae2ab5e3e851129ebbe77df3906f33fda4575de9))
+* tasks execute in declaration order ([1c074a1](https://github.com/raio-robotics/raio/commit/1c074a1d799e5692f235e6e838b93679e80505db))
+* time ([d2e6d09](https://github.com/raio-robotics/raio/commit/d2e6d091d8b3b02959d3c4c1cdf05836f0fe47b6))
+* timer ([e9c8390](https://github.com/raio-robotics/raio/commit/e9c8390fec0bb78d6b6596a7dbda312a7fb32dfc))
+* transport ([a128707](https://github.com/raio-robotics/raio/commit/a128707db4f4ca330861210038ab16044688c9e7))
+* transport call api ([fcca786](https://github.com/raio-robotics/raio/commit/fcca7866aa249815e1d523d1528ab5a0fe2b9a29))
+* use async-net ([eed1583](https://github.com/raio-robotics/raio/commit/eed15835cacaade4695910707a2c399512590557))
+
+
+### Bug Fixes
+
+* benchmark delay to 1 microstep ([67a3cb4](https://github.com/raio-robotics/raio/commit/67a3cb48d5f6e4a46244b04858fb6677107e8bac))
+* ci problem ([2a78027](https://github.com/raio-robotics/raio/commit/2a78027b6a1260383cb4dec00e1353b2d5c555ae))
+* **ci:** release-please version ([2599726](https://github.com/raio-robotics/raio/commit/259972689236787e9cb4ab35506d04c29c95bad9))
+* remove unused imports ([b80c759](https://github.com/raio-robotics/raio/commit/b80c7597bb6a064bbce1654885dd39eef137122c))
+* unused variable in example ([e35270e](https://github.com/raio-robotics/raio/commit/e35270e5400f96047f8ecdf6be545d591f6b772b))
