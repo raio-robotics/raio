@@ -87,6 +87,19 @@ const config: Config = {
     ],
   ],
 
+  plugins: [
+    [
+      // The pages of the applications built with Raio, apart from the documentation.
+      "@docusaurus/plugin-content-docs",
+      {
+        id: "examples",
+        path: "examples",
+        routeBasePath: "examples",
+        sidebarPath: "./sidebarsExamples.ts",
+      },
+    ],
+  ],
+
   themeConfig: {
     colorMode: {
       respectPrefersColorScheme: true,
@@ -103,6 +116,13 @@ const config: Config = {
           sidebarId: "docsSidebar",
           position: "left",
           label: "Documentation",
+        },
+        {
+          type: "docSidebar",
+          sidebarId: "examplesSidebar",
+          docsPluginId: "examples",
+          position: "left",
+          label: "Examples",
         },
         { to: "/blog", label: "Blog", position: "left" },
         {

@@ -1,0 +1,4 @@
+/* GitHub puts a link icon next to each heading; its target is not on this page. */
+.readme :global(.anchor) {
+  display: none;
+}
