@@ -10,6 +10,20 @@ Both variants run one warm-up block followed by three measured five-second block
 
 The analysis checks every native output against the stock result for the same input stamp. Tolerances are 0.05 px maximum corner-coordinate difference, 1 mm translation norm and 0.1 degrees rotation difference using the absolute quaternion dot product. The fixture contains moving views of a single detected tag. The reported p95 is nearest rank within each retained block, then the median across blocks. The stock monitor uses independent sequence counters by default. Received and sent timestamps are paired in order only in complete blocks. Any loss suppresses the across-block p95 for that runtime/rate. Report counts and achieved rates even when latency cannot be paired. This fixed-rate test does not establish maximum sustainable throughput or live-camera latency.
 
+## A40 replay results
+
+Both detection and transform listeners were active. At each rate, both listeners in a given runtime received the same number of messages. Each delivery column therefore gives the count for one stream. P95 measures playback to detection receipt. A dash indicates that missing detections prevented reliable latency pairing.
+
+| Target fps | Isaac ROS p95 (ms) | Raio p95 (ms) | Isaac ROS delivered | Raio delivered | Inputs |
+|---:|---:|---:|---:|---:|---:|
+| 30 | 7.86 | 3.43 | 450 | 450 | 450 |
+| 60 | 5.29 | 3.18 | 900 | 900 | 900 |
+| 120 | 6.58 | 3.29 | 1,800 | 1,800 | 1,800 |
+| 180 | — | 2.98 | 2,695 | 2,700 | 2,700 |
+| 240 | — | 3.29 | 2,346 | 3,600 | 3,600 |
+
+The ten recorded frames repeat their original camera timestamps. Raio playback sets the image and its calibration in the same logical step. The stock detector matches the streams by timestamp on receipt. This comparison includes those input-handling choices.
+
 ## Transport and secondary outputs
 
 All timed components run on one machine. Raio runs the publisher, detector and monitor in separate processes. Native port values travel over TCP loopback, including the image descriptor, calibration and detections. A CUDA IPC handle gives the detector access to the resident GPU pixels. The stock graph composes the playback, detector and monitor into one multithreaded process. It uses NITROS image input and an ordinary ROS 2 detection subscription. During the 240 Hz trial the process loaded `rmw_fastrtps_cpp` and Fast DDS 2.14.7. These observations identify the middleware and graph layout. They do not identify the lower-level delivery mechanism for every DDS message.
@@ -44,8 +58,8 @@ for file in metadata.yaml r2b_storage_0.db3; do
 done
 echo "19fb481a704aed79390e6878d509d9ba4168895dce62ee91ad476e71c5ec8584  $assets/r2b_storage_0.db3" | sha256sum -c -
 bash build-native.sh
-for hz in 30 60 120 180 240 300; do bash matched.sh "$hz"; done
-python3 report.py 30 60 120 180 240 300
+for hz in 30 60 120 180 240; do bash matched.sh "$hz"; done
+python3 report.py 30 60 120 180 240
 ```
 
 The output directory contains per-rate fixtures, raw timestamps, stock reports and the combined `summary.json`. Each rate requires a fresh output path.
