@@ -6,9 +6,15 @@ This compares the published Isaac ROS 4.6 AprilTag node graph with a native Raio
 
 A separate observer captures the exact ten preprocessed frames, calibration messages and per-frame ROS detections in a short 30 Hz playback before the timed blocks in each stock launch. It exits before steady measurements. The Raio launcher checks each image digest and preloads the immutable images into GPU memory. Its source publishes a CUDA IPC frame descriptor and a separate timestamped calibration value on native ports. The native detector reads matching values at the same logical time. It opens the GPU allocation once, uses the source's image pitch and intrinsics, synchronizes CUDA and sends IDs, centers, corners and poses to a separate Raio monitor. The exporting process retains ownership until every child exits. Recorded data and static calibration are specific to this bounded playback test.
 
-Both variants run one warm-up block followed by three measured five-second blocks at each target rate. Each retained ROS block uses the stock C++ composable graph, NITROS image delivery, stock playback and stock detection monitor. The controller exports timestamps *after* monitoring stops. The stock clock starts after publishing the image and calibration group. The Raio clock starts after setting those two ports, before Raio flushes them to the downstream process at the end of its logical step. End time is monitor receipt. This measures the two implemented detection paths including their runtime overhead. The stock node also publishes TF; the Raio graph streams the detection results to one consumer. ROS bag IO, image resizing, GPU preload and initialization are outside the measured interval.
+Both variants run one warm-up block followed by three measured five-second blocks at each target rate. Each retained ROS block uses the stock C++ composable graph, NITROS image delivery, stock playback and stock detection monitor. The controller exports timestamps *after* monitoring stops. The stock clock starts after publishing the image and calibration group. The Raio clock starts after setting those two ports, before Raio flushes them to the downstream process at the end of its logical step. End time is monitor receipt. This measures the two implemented detection paths including their runtime overhead. The stock node also publishes TF; the Raio graph streams the detection results to one consumer. ROS bag IO, image resizing, GPU preload and initialization are outside the measured interval. A playback target of 240 Hz requests 240 images per second from the ten-frame replay buffer.
 
 The analysis checks every native output against the stock result for the same input stamp. Tolerances are 0.05 px maximum corner-coordinate difference, 1 mm translation norm and 0.1 degrees rotation difference using the absolute quaternion dot product. The fixture contains moving views of a single detected tag. The reported p95 is nearest rank within each retained block, then the median across blocks. The stock monitor uses independent sequence counters by default. Received and sent timestamps are paired in order only in complete blocks. Any loss suppresses the across-block p95 for that runtime/rate. Report counts and achieved rates even when latency cannot be paired. This fixed-rate test does not establish maximum sustainable throughput or live-camera latency.
+
+## Transport and secondary outputs
+
+All timed components run on one machine. Raio runs the publisher, detector and monitor in separate processes. Native port values travel over TCP loopback, including the image descriptor, calibration and detections. A CUDA IPC handle gives the detector access to the resident GPU pixels. The stock graph composes the playback, detector and monitor into one multithreaded process. It uses NITROS image input and an ordinary ROS 2 detection subscription. During the 240 Hz trial the process loaded `rmw_fastrtps_cpp` and Fast DDS 2.14.7. These observations identify the middleware and graph layout. They do not identify the lower-level delivery mechanism for every DDS message.
+
+The stock detector includes the camera-relative pose in the detection message, then broadcasts the same pose with a timestamp and parent and child frame names on `/tf`. The benchmark monitor subscribes only to detections. The native port implements that measured output. A second transform output with equivalent frame names and timestamps would be needed for publication parity.
 
 ## Reproduction
 
@@ -34,8 +40,8 @@ for file in metadata.yaml r2b_storage_0.db3; do
 done
 echo "19fb481a704aed79390e6878d509d9ba4168895dce62ee91ad476e71c5ec8584  $assets/r2b_storage_0.db3" | sha256sum -c -
 bash build-native.sh
-for hz in 30 60 120 300; do bash matched.sh "$hz"; done
-python3 report.py 30 60 120 300
+for hz in 30 60 120 180 240 300; do bash matched.sh "$hz"; done
+python3 report.py 30 60 120 180 240 300
 ```
 
 The output directory contains per-rate fixtures, raw timestamps, stock reports and the combined `summary.json`. Each rate requires a fresh output path.
