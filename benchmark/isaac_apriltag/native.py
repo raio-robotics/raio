@@ -1,9 +1,10 @@
 """Native Raio playback, NVIDIA CUDA AprilTag detector and detection monitor."""
 
+import argparse
 import ctypes as c
 import hashlib
 import json
-import sys
+import struct
 import time
 from pathlib import Path
 
@@ -37,6 +38,21 @@ def library():
 def check(rc):
     if rc:
         raise RuntimeError(f"CUDA/detector returned {rc}")
+
+
+def camera_frame(row):
+    if "frame_id" in row:
+        return row["frame_id"]
+    # Earlier fixtures stored only the serialized CameraInfo. Its CDR1 header is
+    # encapsulation, sec, nanosec, then a null-terminated frame name.
+    raw = bytes.fromhex(row["camera_info_cdr"])
+    if raw[:2] not in (b"\x00\x00", b"\x00\x01"):
+        raise ValueError("unsupported CameraInfo CDR encapsulation")
+    byte_order = "<" if raw[1] else ">"
+    length = struct.unpack_from(byte_order + "I", raw, 12)[0]
+    if not 0 < length <= len(raw) - 16 or raw[15 + length] != 0:
+        raise ValueError("invalid CameraInfo frame name")
+    return raw[16 : 15 + length].decode()
 
 
 class Playback(raio.Node):
@@ -73,6 +89,7 @@ class AprilTag(raio.Node):
     image = raio.InputPort[tuple]()
     calibration = raio.InputPort[tuple]()
     tags = raio.OutputPort[tuple]()
+    transforms = raio.OutputPort[tuple]()
 
     @raio.task
     async def compute(self):
@@ -83,7 +100,7 @@ class AprilTag(raio.Node):
             count = c.c_uint()
             async for seq, stamp, index, token, w, h, pitch, nframes in self.image:
                 assert self.calibration.present
-                info_stamp, k, cdr = self.calibration.value
+                info_stamp, parent, k, cdr = self.calibration.value
                 assert info_stamp == stamp and cdr
                 if not ctx:
                     intrinsics = (c.c_float * 4)(k[0], k[4], k[2], k[5])
@@ -93,22 +110,16 @@ class AprilTag(raio.Node):
                         )
                     )
                 check(lib.detect(ctx, index, out, c.byref(count)))
-                self.tags.set(
-                    (
-                        seq,
-                        stamp,
-                        [
-                            (
-                                t.id,
-                                list(t.corners),
-                                list(t.xyz),
-                                list(t.xyzw),
-                                list(t.center),
-                            )
-                            for t in out[: count.value]
-                        ],
+                tags = []
+                transforms = []
+                for tag in out[: count.value]:
+                    xyz, xyzw = list(tag.xyz), list(tag.xyzw)
+                    tags.append(
+                        (tag.id, list(tag.corners), xyz, xyzw, list(tag.center))
                     )
-                )
+                    transforms.append((stamp, parent, f"tag36h11:{tag.id}", xyz, xyzw))
+                self.tags.set((seq, stamp, tags))
+                self.transforms.set((seq, transforms))
         finally:
             if ctx:
                 lib.finish(ctx)
@@ -132,16 +143,35 @@ class Monitor(raio.Node):
         (self.folder / "observed.json").write_text(json.dumps(observed))
 
 
+class TransformMonitor(raio.Node):
+    transforms = raio.InputPort[tuple]()
+
+    def __init__(self, folder):
+        self.folder = folder
+
+    @raio.task
+    async def observe(self):
+        records = []
+        async for seq, transforms in self.transforms:
+            records.append((seq, time.perf_counter_ns(), transforms))
+        (self.folder / "transforms.json").write_text(json.dumps(records))
+
+
 def run():
-    folder = Path(sys.argv[1])
-    rate = float(sys.argv[2])
-    count = int(sys.argv[3])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("folder", type=Path)
+    parser.add_argument("rate", type=float)
+    parser.add_argument("count", type=int)
+    parser.add_argument("fixture", nargs="?", type=Path, default=ROOT / "fixture")
+    parser.add_argument("--no-transform-listener", action="store_true")
+    args = parser.parse_args()
+    folder, rate, count = args.folder, args.rate, args.count
     if rate <= 0 or count < 8 or count % 4:
         raise ValueError(
             "supply a positive rate and four equal blocks of at least two frames"
         )
     folder.mkdir()
-    fixture = Path(sys.argv[4]) if len(sys.argv) > 4 else ROOT / "fixture"
+    fixture = args.fixture
     rows = json.loads((fixture / "manifest.json").read_text())
     frames = []
     for row in rows:
@@ -166,7 +196,8 @@ def run():
             for i, r in enumerate(rows)
         ]
         infos = [
-            (r["stamp"], r["K"], bytes.fromhex(r["camera_info_cdr"])) for r in rows
+            (r["stamp"], camera_frame(r), r["K"], bytes.fromhex(r["camera_info_cdr"]))
+            for r in rows
         ]
         source = Playback(rate, count, folder, images, infos)
         detector = AprilTag()
@@ -174,7 +205,12 @@ def run():
         raio.connect(source.image, detector.image)
         raio.connect(source.calibration, detector.calibration)
         raio.connect(detector.tags, monitor.tags)
-        raio.run(source, detector, monitor)
+        nodes = [source, detector, monitor]
+        if not args.no_transform_listener:
+            listener = TransformMonitor(folder)
+            raio.connect(detector.transforms, listener.transforms)
+            nodes.append(listener)
+        raio.run(*nodes)
     finally:
         check(lib.release(ptr))
 

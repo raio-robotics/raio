@@ -40,7 +40,11 @@ def image(msg):
 
 
 def info(msg):
-    calibration[stamp(msg)] = (list(msg.k), serialize_message(msg).hex())
+    calibration[stamp(msg)] = (
+        list(msg.k),
+        serialize_message(msg).hex(),
+        msg.header.frame_id,
+    )
 
 
 def result(msg):
@@ -83,6 +87,7 @@ try:
                     **images[k],
                     K=calibration[k][0],
                     camera_info_cdr=calibration[k][1],
+                    frame_id=calibration[k][2],
                     tags=detections[k],
                 )
                 for k in complete[:10]

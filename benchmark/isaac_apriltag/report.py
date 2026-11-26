@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from statistics import median
 
-from compare import timing, validate
+from compare import timing, validate, validate_transforms
 
 
 def analyze_rate(root, rate):
@@ -73,13 +73,19 @@ def analyze_rate(root, rate):
         vals["received"] = sum(r["received"] for r in trials)
         vals["sent"] = sum(r["sent"] for r in trials)
         summary[name] = vals
-    return {
+    result = {
         "summary": summary,
         "trials": {"ros": stock, "raio": native},
         "tags_verified": correctness["tags"],
         "max_errors": correctness["max_errors"],
         "reference_ids": sorted({t["id"] for r in manifest for t in r["tags"]}),
     }
+
+    if "frame_id" in manifest[0]:  # Earlier detection-only runs have no transform logs.
+        result["transforms"] = validate_transforms(
+            root / f"stock-{rate}", directory, manifest, records[1:], starts, expected
+        )
+    return result
 
 
 if __name__ == "__main__":

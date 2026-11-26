@@ -51,3 +51,54 @@ def validate(directory, rows):
     return dict(
         **timing(sent, [s[2] for s in seqs]), tags=n_tags, max_errors=errors.tolist()
     )
+
+
+def validate_transforms(stock_dir, native_dir, rows, stock_blocks, starts, block_size):
+    """Check ROS frame semantics and native transform delivery independently of detections."""
+    stock = json.loads((stock_dir / "transforms.json").read_text())
+    native = json.loads((native_dir / "transforms.json").read_text())
+    detections = json.loads((native_dir / "observed.json").read_text())
+    assert len(native) == len(detections) == len(starts)
+    reference = {r["stamp"]: r for r in rows}
+    seen_stamps = set()
+    allows_empty = any(not r["tags"] for r in rows)
+    for _, transforms in stock:
+        if not transforms:
+            # An empty ROS TFMessage has no header to match to an individual image.
+            assert allows_empty, "unexpected empty stock transform batch"
+            continue
+        stamp = transforms[0][0]
+        frame = reference[stamp]
+        expected = sorted(
+            (stamp, frame["frame_id"], f"tag36h11:{t['id']}", t["xyz"], t["xyzw"])
+            for t in frame["tags"]
+        )
+        assert [tuple(t) for t in sorted(transforms)] == expected
+        seen_stamps.add(stamp)
+    assert seen_stamps == {s for s, r in reference.items() if r["tags"]}
+    for i, ((seq, receipt, transforms), (dseq, stamp, _, tags)) in enumerate(
+        zip(native, detections)
+    ):
+        assert seq == dseq == i and receipt >= starts[i]
+        row = reference[stamp]
+        expected = [
+            (stamp, row["frame_id"], f"tag36h11:{tag_id}", xyz, xyzw)
+            for tag_id, _, xyz, xyzw, _ in tags
+        ]
+        assert [tuple(t) for t in transforms] == expected
+    ros_counts, native_counts = [], []
+    for i, (published, _) in enumerate(stock_blocks, start=1):
+        first, last = published[0][1], published[-1][1]
+        ros_counts.append(
+            sum(first <= clock <= last + 500_000_000 for clock, _ in stock)
+        )
+        block = native[i * block_size : (i + 1) * block_size]
+        deadline = starts[(i + 1) * block_size - 1] + 500_000_000
+        native_counts.append(sum(receipt <= deadline for _, receipt, _ in block))
+    assert all(0 < n <= block_size for n in ros_counts)
+    return {
+        "ros_blocks_received": ros_counts,
+        "raio_blocks_received": native_counts,
+        "ros_messages_checked_including_fixture_and_warmup": len(stock),
+        "raio_messages_checked_including_warmup": len(native),
+    }
