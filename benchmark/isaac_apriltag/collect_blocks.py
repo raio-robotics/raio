@@ -32,6 +32,7 @@ def main():
                     rows.append(dict(target_fps=rate, launch=label, block=number,
                                      runtime=runtime, inputs=block["sent"],
                                      offered_fps=round(block["sent_hz"], 4),
+                                     output_fps=round(block["received_hz"], 4),
                                      detections=block["received"], transform_batches=tf,
                                      drained_detections=block.get("drained"),
                                      last_detection_after_last_input_ms=block.get("last_detection_after_last_input_ms"),

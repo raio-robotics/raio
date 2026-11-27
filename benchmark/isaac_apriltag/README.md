@@ -102,15 +102,41 @@ Detection and transform receivers recorded identical counts in every block. Each
 | 30 | 900 | 900 (100.0%) | 900 (100.0%) | 17.78 | 13.53 |
 | 120 | 3,600 | 3,557 (98.8%) | 3,600 (100.0%) | — | 5.71 |
 | 180 | 5,400 | 3,635 (67.3%) | 5,400 (100.0%) | — | 46.55 |
+| 191 | 5,730 | 3,482 (60.8%) | 5,730 (100.0%) | — | 62.08 |
+| 193 | 5,790 | 3,479 (60.1%) | 5,790 (100.0%) | — | 62.71 |
 | 240 | 7,200 | 3,183 (44.2%) | 6,528 (90.7%) | — | — |
 
 At the 240 fps target, the Isaac ROS publisher offered 237.37–238.25 fps across six blocks. 2 of six fell outside the configured 1% tolerance. Raio offered 239.999–240.005 fps. Raio eventually delivered all 7,200 detections and transform batches. Its last detection in each block arrived 1.00–1.15 s after the last input. The stock detection monitor stopped after the 0.5 s grace period, so the experiment cannot distinguish late stock detections from dropped ones.
+
+### Stock benchmark and matched-input comparisons
+
+At a 191 fps target on this board, Raio delivered 191.3 detections/s versus 125.0 in NVIDIA’s unmodified benchmark, a 53% throughput gain. At 193 fps, the paired test delivered 193.3 detections/s for Raio and 115.2 for Isaac ROS, a 68% gain. The paired rates are medians across six five-second blocks, calculated from the intervals between consecutive detections. NVIDIA’s stock report divides the detection count by the elapsed time between first and last receipt and drops the highest and lowest of five blocks before averaging. Its monitor waits 5 s after playback. The paired monitor waits 0.5 s. The paired ROS controller also records publication times and counts transforms through an additional subscriber.
+
+| Unmodified Isaac ROS 5.1 on this Orin | Reported input fps | Reported output fps |
+| --- | ---: | ---: |
+| [Default throughput search](../results/isaac_apriltag/stock/default.json) | 139.7 | 137.4 |
+| [191 fps target](../results/isaac_apriltag/stock/fixed-191.json) | 190.3 | 125.0 |
+| [240 fps target](../results/isaac_apriltag/stock/fixed-240.json) | 238.6 | 113.8 |
+
+NVIDIA reports 191.0 detections/s at 193.0 input fps on its AGX Orin. Raio’s six 193 fps blocks ranged from 188.8 to 193.4 detections/s. The public report identifies the platform family. Its RAM and clock settings are unspecified, and the cause of the difference between the local and published Isaac ROS results is unresolved. [NVIDIA’s release report](https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_benchmark/blob/release-5.1/results/isaac_ros_apriltag_node-agx_orin.json)
+
+In the prepared Lyrical container, start a fresh shell and run the installed NVIDIA benchmark directly for the 191 fps control. Use the same dataset under `/trial/assets`. For the default search, omit the two frequency overrides. For the 240 fps control, set both bounds to 240. Run each control in a fresh log directory.
+
+```sh
+source /opt/ros/lyrical/setup.bash
+export ISAAC_ROS_WS=/trial ROS2_BENCHMARK_OVERRIDE_ASSETS_ROOT=/trial/assets
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/opt/nvidia/vpi4/lib/$(gcc -print-multiarch):${LD_LIBRARY_PATH:-}"
+export ROS2_BENCHMARK_OVERRIDE_LOG_FOLDER=$(mktemp -d /trial/apriltag-control.XXXXXX)
+export ROS2_BENCHMARK_OVERRIDE_PUBLISHER_LOWER_FREQUENCY=191
+export ROS2_BENCHMARK_OVERRIDE_PUBLISHER_UPPER_FREQUENCY=191
+launch_test /opt/ros/lyrical/share/isaac_ros_apriltag_benchmark/scripts/isaac_ros_apriltag_node.py
+```
 
 ![AprilTag detection and transform delivery by input rate](../results/isaac_apriltag/orin-51-delivery.png)
 
 [Orin per-block measurements](../results/isaac_apriltag/orin-51-blocks.csv)
 
-On Orin, the auxiliary subscriber uses reliable QoS and captures the ten buffered frames at 5 fps after timing. Run each repeat in a fresh directory containing the example sources. Build the native library there and run the fixed rates as above. To regenerate the CSV and figure from two launch directories, run the following in the example source directory. NumPy is required for validation and Matplotlib for plotting.
+On Orin, the auxiliary subscriber uses reliable QoS and captures the ten buffered frames at 5 fps after timing. Run each repeat in a fresh directory containing the example sources. Build the native library there and run `bash matched.sh RATE` for each of 30, 120, 180, 191, 193 and 240 fps. The 180/240 and 191/193 pairs each ran in reverse order on their second launch. To regenerate the CSV and figure from two launch directories, run the following in the example source directory. NumPy is required for validation and Matplotlib for plotting.
 
 ```sh
 python3 collect_blocks.py --launch first /trial/first --launch second /trial/second orin-51-blocks.csv

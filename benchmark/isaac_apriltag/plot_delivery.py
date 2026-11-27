@@ -19,9 +19,13 @@ def main():
         for row in csv.DictReader(stream):
             counts[int(row["target_fps"]), row["runtime"]].append(row)
     rates = sorted({rate for rate, _ in counts})
-    fig, axes = plt.subplots(1, 2, figsize=(9.8, 4.0), sharey=True, layout="constrained")
-    for axis, (field, title) in zip(axes, (("detections", "Detections"),
-                                            ("transform_batches", "Transform batches"))):
+    fields = [("detections", "Detections"), ("transform_batches", "Transform batches")]
+    if all(row["detections"] == row["transform_batches"] for blocks in counts.values() for row in blocks):
+        fields = [("detections", "Identical delivery counts for detections and transform batches")]
+    fig, grid = plt.subplots(1, len(fields), figsize=(8 if len(fields) == 1 else 12, 4.1),
+                             sharey=True, squeeze=False, layout="constrained")
+    axes = grid[0]
+    for axis, (field, title) in zip(axes, fields):
         for offset, runtime, name, color in ((-0.20, "ros", "Isaac ROS 5.1", "#32678e"),
                                               (0.20, "raio", "Raio 0.2.0", "#cf7726")):
             fractions = []
@@ -31,14 +35,14 @@ def main():
                                  sum(int(row["inputs"]) for row in blocks))
             bars = axis.bar([i + offset for i in range(len(rates))], fractions, 0.37,
                             label=name, color=color)
-            axis.bar_label(bars, labels=[f"{100*x:.0f}%" for x in fractions], fontsize=8)
+            axis.bar_label(bars, labels=[f"{100*x:.1f}%" for x in fractions], fontsize=8)
         axis.set(title=title, xlabel="Requested input (frames/s)", ylim=(0, 1.14))
         axis.set_xticks(range(len(rates)), rates)
         axis.yaxis.set_major_formatter(PercentFormatter(1))
         axis.spines[["top", "right"]].set_visible(False)
     axes[0].set_ylabel("Outputs received / input frames")
-    axes[1].legend(loc="lower left")
-    fig.suptitle("AprilTag replay on Jetson AGX Orin 64 GB")
+    axes[-1].legend(loc="lower left")
+    fig.suptitle("Paired AprilTag replay on Jetson AGX Orin 64 GB")
     fig.savefig(args.figure, dpi=170)
     plt.close(fig)
 
