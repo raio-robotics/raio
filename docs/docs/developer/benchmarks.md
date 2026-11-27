@@ -59,18 +59,4 @@ Dashed arrows show preparation of the playback buffer before timing. During the 
 
 ### Running the AprilTag benchmark
 
-Set up a GPU-enabled JetPack container with Isaac ROS 5.1, Raio 0.2.0, and the NVIDIA `r2b_storage` recording. The scripts expect the recording under `/trial/assets` and the Raio Python packages under `/trial/deps`. The README lists the packages, dataset download commands, and how to run NVIDIA's unmodified benchmark for the 191 fps comparison. [Environment setup](https://github.com/raio-robotics/raio/tree/main/benchmark/isaac_apriltag#reproduction) · [NVIDIA control commands](https://github.com/raio-robotics/raio/tree/main/benchmark/isaac_apriltag#stock-benchmark-and-matched-input-comparisons)
-
-From the Raio checkout root inside that container, run the paired comparison at 193 fps:
-
-```bash
-trial=$(mktemp -d /trial/apriltag.XXXXXX)
-cp benchmark/isaac_apriltag/*.{py,cpp,hpp,sh} "$trial/"
-cd "$trial"
-export ROS_DISTRO=lyrical OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
-bash build-native.sh
-bash matched.sh 193
-python3 report.py 193
-```
-
-Each launch runs three measured five-second playbacks per runtime and writes counts and latency to `summary.json`. Repeat in a fresh trial directory to match the six playbacks per runtime in the table. To try the other Orin rates, replace `193` in both commands with `30`, `120`, `180`, `191`, or `240`.
+[`benchmark/isaac_apriltag/README.md`](https://github.com/raio-robotics/raio/blob/main/benchmark/isaac_apriltag/README.md#reproduction)
