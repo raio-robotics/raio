@@ -4,6 +4,26 @@ sidebar_position: 4
 
 # Benchmarks
 
+The repository has a benchmark that compares Raio with other middleware.
+
+## Setup
+
+The benchmark measures **latency**: the time to send an array from one node to another and multiply it, for a range of array sizes. It compares rclpy (ROS 2), Ray, Rosia, and Raio. The setup is that of the [Rosia benchmark](https://github.com/rosia-project/rosia-py/tree/main/benchmark).
+
+## Running
+
+The benchmark runs in Docker:
+
+```bash
+docker compose -f benchmark/docker-compose.yml up --build
+```
+
+Results are saved to `benchmark/results/`.
+
+## Results
+
+Results are not published here yet.
+
 ## AprilTag detection on Jetson AGX Orin
 
 At a 191 fps input target, **Raio delivered 191.3 detections/s versus 125.0 for NVIDIA’s unmodified Isaac ROS 5.1 benchmark** on the same 64 GB Jetson AGX Orin Developer Kit. That is **53% higher detection throughput** for this 720p replay. Both pipelines used NVIDIA’s cuAprilTags detector and the same ten buffered images. The board ran JetPack 7.2.2 in MAXN mode.
@@ -34,17 +54,3 @@ Raio's built-in diagram shows the nodes, their ports, and the connections used i
 ![Discovered Isaac ROS graph showing loading and resizing before playback, then detection output to MonitorNode and transforms to the separate benchmark listener](img/apriltag-isaac-ros.svg)
 
 Dashed arrows show preparation of the playback buffer before timing. During the measured bursts, `PlaybackNode` sends the buffered images and calibration to `AprilTagNode`. `MonitorNode` measures detection receipt. The paired test adds the separate `/tf` listener. Topic labels omit the common `/r2b/` prefix. The diagram uses publisher and subscriber endpoints discovered during an AprilTag launch on the Orin. ROS 2 also provides `rqt_graph` for viewing the live node and topic graph. [ROS 2 graph viewer](https://github.com/ros-visualization/rqt_graph)
-
-## Original array-latency benchmark
-
-This standalone benchmark measures **latency** as the time to send an array from one node to another and multiply it, for a range of array sizes. It compares rclpy (ROS 2), Ray, Rosia, and Raio. The setup is that of the [Rosia benchmark](https://github.com/rosia-project/rosia-py/tree/main/benchmark).
-
-### Running
-
-The benchmark runs in Docker:
-
-```bash
-docker compose -f benchmark/docker-compose.yml up --build
-```
-
-Results are saved to `benchmark/results/`.
