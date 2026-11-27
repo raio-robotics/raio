@@ -35,7 +35,7 @@ At a 191 fps input target, **Raio delivered 191.3 detections/s versus 125.0 for 
 | Same Orin, unmodified NVIDIA benchmark | 191 | 191.3 | 125.0 | +53% |
 | Same Orin, both detections and transforms monitored | 193 | 193.3 | 115.2 | +68% |
 
-The first row compares six five-second Raio bursts (median output rate, 0.5 s grace period) with NVIDIA’s five-burst procedure (trimmed mean output rate, 5 s grace period). The second row uses the same six-burst protocol and grace period for both runtimes. Raio delivered all 5,790 detections and transform batches there, with **62.7 ms p95** from publication to detection receipt. The paired Isaac ROS run delivered 3,479 of each.
+The first row compares six five-second Raio bursts (median output rate, 0.5 s grace period) with NVIDIA’s five-burst procedure (trimmed mean output rate, 5 s grace period). The second row uses the same six-burst protocol and grace period for both pipelines. Raio delivered all 5,790 detections and transform batches there, with **62.7 ms p95** from publication to detection receipt. The paired Isaac ROS run delivered 3,479 of each.
 
 On its own AGX Orin, NVIDIA reports **191.0 output fps at 193.0 input fps**. Raio’s six bursts at that input ranged from **188.8 to 193.4 output fps**, placing the published result within our measured range. On our board, the unmodified NVIDIA benchmark’s default throughput search reported 137.4 fps. The reason for the difference between the two Isaac ROS results is unresolved. [NVIDIA’s release report](https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_benchmark/blob/release-5.1/results/isaac_ros_apriltag_node-agx_orin.json)
 
