@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from pathlib import Path
 
 from ros2_benchmark.basic_performance_calculator import BasicPerformanceCalculator
@@ -23,8 +24,23 @@ def configure(test_class):
         return result
 
     def loop_with_fixture(self):
-        self.benchmark_body(30, 30.0)
-        return original_loop(self)
+        control = os.environ.get("APRILTAG_CAPTURE_CONTROL")
+        if not control:
+            self.benchmark_body(30, 30.0)
+            return original_loop(self)
+        # Keep external image subscriptions out of Lyrical's timed buffer negotiation.
+        result = original_loop(self)
+        folder = Path(control)
+        (folder / "capture-start").touch()
+        deadline = time.monotonic() + 15
+        while not (folder / "capture-ready").exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError("fixture observer did not start")
+            time.sleep(0.05)
+        time.sleep(2.0)
+        capture_rate = 5.0 if os.environ.get("APRILTAG_RELIABLE_CAPTURE") else 30.0
+        self.benchmark_body(30, capture_rate)
+        return result
 
     BasicPerformanceCalculator.calculate_performance = save_timings
     test_class.config.additional_fixed_publisher_rate_tests = []

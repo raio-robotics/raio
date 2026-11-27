@@ -6,6 +6,10 @@
 #include <cstring>
 #include <memory>
 
+#ifdef RAIO_ORIN_VMM
+#include "orin_slabs.hpp"
+#endif
+
 struct Tag {
   int id;
   float corners[8], center[2], xyz[3], xyzw[4];
@@ -19,12 +23,19 @@ struct Detector {
   ~Detector() {
     if (handle) cuAprilTagsDestroy(handle);
     if (stream) cudaStreamDestroy(stream);
+#ifdef RAIO_ORIN_VMM
+    if (buffer) orin::release(buffer);
+#else
     if (buffer) cudaIpcCloseMemHandle(buffer);
+#endif
   }
 };
 
 extern "C" {
 int upload(const void* data, size_t bytes, void** ptr, unsigned char* token) {
+#ifdef RAIO_ORIN_VMM
+  return orin::allocate(data, bytes, ptr, token);
+#else
   cudaIpcMemHandle_t ipc;
   static_assert(sizeof(ipc) == 64);
   auto err = cudaMalloc(ptr, bytes);
@@ -38,17 +49,29 @@ int upload(const void* data, size_t bytes, void** ptr, unsigned char* token) {
   }
   std::memcpy(token, &ipc, sizeof(ipc));
   return 0;
+#endif
 }
-int release(void* ptr) { return cudaFree(ptr); }
+int release(void* ptr) {
+#ifdef RAIO_ORIN_VMM
+  return orin::release(ptr);
+#else
+  return cudaFree(ptr);
+#endif
+}
 int prepare(const unsigned char* token, int w, int h, int pitch, int frames,
             const float* k, Detector** result) {
   auto d = std::make_unique<Detector>();
+#ifdef RAIO_ORIN_VMM
+  try { d->buffer = orin::open_slab(token); }
+  catch (const std::exception &e) { std::fprintf(stderr, "%s\n", e.what()); return -1; }
+#else
   cudaIpcMemHandle_t ipc;
   std::memcpy(&ipc, token, sizeof(ipc));
   auto err = cudaIpcOpenMemHandle(&d->buffer, ipc, cudaIpcMemLazyEnablePeerAccess);
   if (err != cudaSuccess) return err;
-  err = cudaStreamCreate(&d->stream);
-  if (err != cudaSuccess) return err;
+#endif
+  auto stream_status = cudaStreamCreate(&d->stream);
+  if (stream_status != cudaSuccess) return stream_status;
   cuAprilTagsCameraIntrinsics_t intrinsics{k[0], k[1], k[2], k[3]};
   int rc = nvCreateAprilTagsDetector(&d->handle, w, h, 4, NVAT_TAG36H11, &intrinsics, 0.22f);
   if (rc) return rc;

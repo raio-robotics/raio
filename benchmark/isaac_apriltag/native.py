@@ -66,6 +66,7 @@ class Playback(raio.Node):
     @raio.task
     async def play(self):
         sent = []
+        before_publish = []
         epoch = self.count // 4
         for i in range(self.count):
             if i % epoch == 0:
@@ -78,10 +79,13 @@ class Playback(raio.Node):
                 await raio.wait(raio.Time(500_000_000))
             await raio.wait(raio.Time(round(1e9 / self.rate)))
             idx = i % len(self.images)
-            self.image.set((i, *self.images[idx]))
+            packet = (i, *self.images[idx])
+            before_publish.append(time.perf_counter_ns())
+            self.image.set(packet)
             self.calibration.set(self.infos[idx])
             start = time.perf_counter_ns()
             sent.append(start)
+        (self.folder / "before-publish.json").write_text(json.dumps(before_publish))
         (self.folder / "sent.json").write_text(json.dumps(sent))
 
 

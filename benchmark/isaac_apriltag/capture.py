@@ -8,7 +8,7 @@ from pathlib import Path
 
 import rclpy
 from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, qos_profile_sensor_data
 from rclpy.serialization import serialize_message
 from sensor_msgs.msg import CameraInfo, Image
 
@@ -67,14 +67,25 @@ def result(msg):
     detections[stamp(msg)] = tags
 
 
+control = os.environ.get("APRILTAG_CAPTURE_CONTROL")
+if control:
+    deadline = time.monotonic() + 180
+    while not (Path(control) / "capture-start").exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError("timing controller did not request fixture capture")
+        time.sleep(0.05)
+
 rclpy.init()
 node = rclpy.create_node("raio_fixture_capture")
+qos = QoSProfile(depth=30) if os.environ.get("APRILTAG_RELIABLE_CAPTURE") else qos_profile_sensor_data
 for typ, topic, fn in (
     (Image, "image", image),
     (CameraInfo, "camera_info", info),
     (AprilTagDetectionArray, "apriltag_detections", result),
 ):
-    node.create_subscription(typ, "/r2b/" + topic, fn, qos_profile_sensor_data)
+    node.create_subscription(typ, "/r2b/" + topic, fn, qos)
+if control:
+    (Path(control) / "capture-ready").touch()
 try:
     until = time.monotonic() + 180
     while time.monotonic() < until:
