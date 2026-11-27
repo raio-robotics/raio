@@ -9,6 +9,7 @@ Replay the same ten 1280 × 720 frames and camera calibration through the native
 The reported run used a 64 GB AGX Orin Developer Kit, JetPack 7.2.2 in MAXN mode, Isaac ROS 5.1 on ROS 2 Lyrical, and Raio 0.2.0. Use a GPU-enabled JetPack container with CUDA exposed at `/usr/local/cuda`, a writable `/trial`, and the checkout accessible inside the container. Configure the Isaac ROS 5.1 and Lyrical package repositories and install these dependencies. [NVIDIA setup](https://nvidia-isaac-ros.github.io/getting_started/index.html)
 
 ```sh
+apt-get update
 apt-get install -y ros-lyrical-isaac-ros-apriltag-benchmark \
     ros-lyrical-launch-testing-ros ros-lyrical-rosbag2-storage-sqlite3 \
     libeigen3-dev g++ curl python3-pip python3-numpy python3-pytest
@@ -17,7 +18,7 @@ apt-get install -y ros-lyrical-isaac-ros-apriltag-benchmark \
 Prepare the recording (about 3.1 GB) and the Raio Python package once per environment.
 
 ```sh
-python3 -m pip install --target /trial/deps raio-py==0.2.0
+python3 -m pip install --target /trial/deps raio-py==0.2.0 cloudpickle==3.1.3 msgpack==1.2.4
 assets=/trial/assets/datasets/r2b_dataset/r2b_storage
 mkdir -p "$assets"
 base=https://api.ngc.nvidia.com/v2/resources/nvidia/isaac/r2bdataset2023/versions/2/files/r2b_storage
@@ -39,7 +40,7 @@ bash matched.sh 193
 python3 analysis/report.py 193
 ```
 
-`summary.json` contains the validated counts and timings. The trial also keeps the reference frames and raw timestamps. Each launch measures three five-second playbacks per runtime. Run a second fresh trial to match the six playbacks in the results table. Replace `193` in both commands to test the other Orin rates (30, 120, 180, 191, or 240 fps).
+`summary.json` contains the validated counts and timings. The trial also keeps the reference frames and raw timestamps. Each launch measures three five-second playbacks per pipeline. Repeat in a fresh trial directory to match the six playbacks in the results table. `matched.sh` protects existing outputs for the same rate. Different rates can share a trial directory. Replace `193` in both commands to test 30, 120, 180, 191, or 240 fps.
 
 ### Run NVIDIA's unmodified benchmark
 
@@ -74,8 +75,8 @@ Inside that container, run `bash isaac_ros/provision.sh`, install `libeigen3-dev
 | Path | Role |
 | --- | --- |
 | [`matched.sh`](matched.sh) | Runs one paired trial at the requested input rate. |
-| [`raio/`](raio/) | `pipeline.py` runs the Python playback and detector nodes. `cuapriltags_adapter.cpp` wraps NVIDIA’s detector for those Python nodes. Build with `bash raio/build-native.sh`. Generate the node diagram with `python3 raio/draw_raio_graph.py apriltag-raio.svg`. |
-| [`isaac_ros/`](isaac_ros/) | Launches and instruments NVIDIA's benchmark, captures the reference frames, and listens for tag poses. |
+| [`raio/`](raio/) | `pipeline.py` runs the Python playback and detector nodes. `cuapriltags_adapter.cpp` wraps NVIDIA’s detector for those Python nodes. Build with `bash raio/build-native.sh`. Generate the node diagram with `PYTHONPATH=/trial/deps python3 raio/draw_raio_graph.py apriltag-raio.svg`. |
+| [`isaac_ros/`](isaac_ros/) | Launches and instruments NVIDIA's benchmark, captures reference frames, calibration, and per-frame detections, and listens for tag poses. |
 | [`analysis/`](analysis/) | Validates detections and poses, reports latency, combines trial data, and draws the delivery chart. |
 
 The [results directory](../results/isaac_apriltag/README.md) contains the saved measurements, timing and validation details, and the Isaac ROS graph snapshot.
