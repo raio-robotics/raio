@@ -33,4 +33,4 @@ wait "$listener"
 wait "$observer"
 trap - EXIT
 test -s "$FIXTURE/manifest.json"
-env -u AMENT_PREFIX_PATH -u ROS_DISTRO -u ROS_VERSION PYTHONPATH=/trial/deps python3 raio/native.py "$PWD/raio-$rate" "$rate" "$((rate*5*4))" "$FIXTURE" > "raio-$rate.log" 2>&1
+env -u AMENT_PREFIX_PATH -u ROS_DISTRO -u ROS_VERSION PYTHONPATH=/trial/deps python3 raio/pipeline.py "$PWD/raio-$rate" "$rate" "$((rate*5*4))" "$FIXTURE" > "raio-$rate.log" 2>&1

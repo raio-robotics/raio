@@ -229,6 +229,6 @@ def run():
 
 if __name__ == "__main__":
     # Importing the node classes by module name keeps ctypes descriptors process-local.
-    from native import run
+    from pipeline import run
 
     run()

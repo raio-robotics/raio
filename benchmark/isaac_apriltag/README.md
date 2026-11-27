@@ -74,7 +74,7 @@ Inside that container, run `bash isaac_ros/provision.sh`, install `libeigen3-dev
 | Path | Role |
 | --- | --- |
 | [`matched.sh`](matched.sh) | Runs one paired trial at the requested input rate. |
-| [`raio/`](raio/) | Python playback and detector nodes, the C++ cuAprilTags wrapper, and Orin GPU memory sharing. Build with `bash raio/build-native.sh`. Generate the node diagram with `python3 raio/draw_raio_graph.py apriltag-raio.svg`. |
+| [`raio/`](raio/) | `pipeline.py` runs the Python playback and detector nodes. `cuapriltags_adapter.cpp` wraps NVIDIA’s detector for those Python nodes. Build with `bash raio/build-native.sh`. Generate the node diagram with `python3 raio/draw_raio_graph.py apriltag-raio.svg`. |
 | [`isaac_ros/`](isaac_ros/) | Launches and instruments NVIDIA's benchmark, captures the reference frames, and listens for tag poses. |
 | [`analysis/`](analysis/) | Validates detections and poses, reports latency, combines trial data, and draws the delivery chart. |
 

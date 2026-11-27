@@ -5,7 +5,7 @@ from pathlib import Path
 
 import raio
 
-from native import make_nodes
+from pipeline import make_nodes
 
 
 def main():

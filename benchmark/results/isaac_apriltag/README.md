@@ -86,7 +86,7 @@ Each detector computes the pose once. The native node unconditionally sets its `
 
 The stock graph keeps its normal detection monitor. A separate ROS process listens on `/tf` during fixture collection and all timing blocks. The native graph has a separate transform monitor. The report checks both transform streams against the stock reference poses and camera frame names and reports their delivery counts separately from detection latency. This measures publication and delivery. There is no transform-tree query in the benchmark.
 
-To exercise the native graph with an unwired transform port, append `--no-transform-listener` to the `raio/native.py` invocation with a fresh output directory. The detector still sets both ports. The paired comparison uses a listener on each side.
+To exercise the native graph with an unwired transform port, append `--no-transform-listener` to the `raio/pipeline.py` invocation with a fresh output directory. The detector still sets both ports. The paired comparison uses a listener on each side.
 
 ## NVIDIA benchmark source
 
