@@ -56,3 +56,21 @@ Raio's built-in diagram shows the nodes, their ports, and the connections used i
 ![Discovered Isaac ROS graph showing loading and resizing before playback, then detection output to MonitorNode and transforms to the separate benchmark listener](img/apriltag-isaac-ros.svg)
 
 Dashed arrows show preparation of the playback buffer before timing. During the measured bursts, `PlaybackNode` sends the buffered images and calibration to `AprilTagNode`. `MonitorNode` measures detection receipt. The paired test adds the separate `/tf` listener. Topic labels omit the common `/r2b/` prefix. The diagram uses publisher and subscriber endpoints discovered during an AprilTag launch on the Orin. ROS 2 also provides `rqt_graph` for viewing the live node and topic graph. [ROS 2 graph viewer](https://github.com/ros-visualization/rqt_graph)
+
+### Running the AprilTag benchmark
+
+Set up a GPU-enabled JetPack container with Isaac ROS 5.1, Raio 0.2.0, and the NVIDIA `r2b_storage` recording. The scripts expect the recording under `/trial/assets` and the Raio Python packages under `/trial/deps`. The README lists the packages, dataset download commands, and how to run NVIDIA's unmodified benchmark for the 191 fps comparison. [Environment setup](https://github.com/raio-robotics/raio/tree/main/benchmark/isaac_apriltag#reproduction) · [NVIDIA control commands](https://github.com/raio-robotics/raio/tree/main/benchmark/isaac_apriltag#stock-benchmark-and-matched-input-comparisons)
+
+From the Raio checkout root inside that container, run the paired comparison at 193 fps:
+
+```bash
+trial=$(mktemp -d /trial/apriltag.XXXXXX)
+cp benchmark/isaac_apriltag/*.{py,cpp,hpp,sh} "$trial/"
+cd "$trial"
+export ROS_DISTRO=lyrical OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+bash build-native.sh
+bash matched.sh 193
+python3 report.py 193
+```
+
+Each launch runs three measured five-second playbacks per runtime and writes counts and latency to `summary.json`. Repeat in a fresh trial directory to match the six playbacks per runtime in the table. To try the other Orin rates, replace `193` in both commands with `30`, `120`, `180`, `191`, or `240`.
