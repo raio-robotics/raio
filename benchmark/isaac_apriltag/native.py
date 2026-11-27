@@ -161,6 +161,21 @@ class TransformMonitor(raio.Node):
         (self.folder / "transforms.json").write_text(json.dumps(records))
 
 
+def make_nodes(rate, count, folder, images, infos, listen_to_transforms=True):
+    source = Playback(rate, count, folder, images, infos)
+    detector = AprilTag()
+    monitor = Monitor(folder, count // 4)
+    raio.connect(source.image, detector.image)
+    raio.connect(source.calibration, detector.calibration)
+    raio.connect(detector.tags, monitor.tags)
+    nodes = [source, detector, monitor]
+    if listen_to_transforms:
+        listener = TransformMonitor(folder)
+        raio.connect(detector.transforms, listener.transforms)
+        nodes.append(listener)
+    return nodes
+
+
 def run():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("folder", type=Path)
@@ -203,17 +218,10 @@ def run():
             (r["stamp"], camera_frame(r), r["K"], bytes.fromhex(r["camera_info_cdr"]))
             for r in rows
         ]
-        source = Playback(rate, count, folder, images, infos)
-        detector = AprilTag()
-        monitor = Monitor(folder, count // 4)
-        raio.connect(source.image, detector.image)
-        raio.connect(source.calibration, detector.calibration)
-        raio.connect(detector.tags, monitor.tags)
-        nodes = [source, detector, monitor]
-        if not args.no_transform_listener:
-            listener = TransformMonitor(folder)
-            raio.connect(detector.transforms, listener.transforms)
-            nodes.append(listener)
+        nodes = make_nodes(
+            rate, count, folder, images, infos,
+            listen_to_transforms=not args.no_transform_listener,
+        )
         raio.run(*nodes)
     finally:
         check(lib.release(ptr))

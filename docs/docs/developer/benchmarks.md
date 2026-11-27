@@ -21,9 +21,23 @@ On its own AGX Orin, NVIDIA reports **191.0 output fps at 193.0 input fps**. Rai
 
 At a 240 fps target, 90.7% of Raio outputs and 44.2% of paired Isaac ROS outputs arrived within the measurement window. All of Raio’s remaining outputs arrived afterward. The experiment measures buffered replay in five-second bursts. [Method and reproduction commands](https://github.com/raio-robotics/raio/tree/main/benchmark/isaac_apriltag) · [Block measurements and stock reports](https://github.com/raio-robotics/raio/tree/main/benchmark/results/isaac_apriltag)
 
-## Array latency
+### AprilTag node graphs
 
-The benchmark measures **latency** as the time to send an array from one node to another and multiply it, for a range of array sizes. It compares rclpy (ROS 2), Ray, Rosia, and Raio. The setup is that of the [Rosia benchmark](https://github.com/rosia-project/rosia-py/tree/main/benchmark).
+#### Raio
+
+![Raio-generated graph showing playback sending image and calibration to AprilTag, which sends detections and transforms to two monitors](img/apriltag-raio.svg)
+
+Raio's built-in diagram shows the nodes, their ports, and the connections used in the paired run. Playback sends an image reference and its calibration to AprilTag. The detector sends tag detections to the timing monitor and poses to the transform monitor.
+
+#### Isaac ROS 5.1
+
+![Discovered Isaac ROS graph showing loading and resizing before playback, then detection output to MonitorNode and transforms to the separate benchmark listener](img/apriltag-isaac-ros.svg)
+
+Dashed arrows show preparation of the playback buffer before timing. During the measured bursts, `PlaybackNode` sends the buffered images and calibration to `AprilTagNode`. `MonitorNode` measures detection receipt. The paired test adds the separate `/tf` listener. Topic labels omit the common `/r2b/` prefix. The diagram uses publisher and subscriber endpoints discovered during an AprilTag launch on the Orin. ROS 2 also provides `rqt_graph` for viewing the live node and topic graph. [ROS 2 graph viewer](https://github.com/ros-visualization/rqt_graph)
+
+## Original array-latency benchmark
+
+This standalone benchmark measures **latency** as the time to send an array from one node to another and multiply it, for a range of array sizes. It compares rclpy (ROS 2), Ray, Rosia, and Raio. The setup is that of the [Rosia benchmark](https://github.com/rosia-project/rosia-py/tree/main/benchmark).
 
 ### Running
 

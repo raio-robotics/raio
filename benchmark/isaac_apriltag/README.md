@@ -48,6 +48,16 @@ The stock graph keeps its normal detection monitor. A separate ROS process liste
 
 To exercise the native graph with an unwired transform port, append `--no-transform-listener` to the `native.py` invocation with a fresh output directory. The detector still sets both ports. The paired comparison uses a listener on each side.
 
+## Node graphs
+
+The paired Raio graph is generated from the same node factory as the replay. To draw it with a Python environment that has Raio installed, run:
+
+```sh
+python3 draw_raio_graph.py apriltag-raio.svg
+```
+
+The Isaac ROS 5.1 graph was captured through live publisher and subscriber discovery during a separate AprilTag launch. The snapshot covers the image, calibration, detection, and transform topics. The Graphviz source groups the five NVIDIA nodes in their shared container and shows the paired test's separate transform listener. [Discovered ROS endpoints](../results/isaac_apriltag/ros-graph-endpoints.json) · [Graphviz source](../results/isaac_apriltag/isaac-ros-apriltag.dot)
+
 ## Reproduction
 
 From the checkout root, stage the scripts in a fresh directory on an x86-64 GPU host with Docker's NVIDIA runtime.

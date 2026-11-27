@@ -1,0 +1,66 @@
+{
+  "/r2b/data_loader/image": {
+    "publishers": [
+      "/r2b/DataLoaderNode"
+    ],
+    "subscribers": [
+      "/r2b/PrepResizeNode"
+    ]
+  },
+  "/r2b/data_loader/camera_info": {
+    "publishers": [
+      "/r2b/DataLoaderNode"
+    ],
+    "subscribers": [
+      "/r2b/PrepResizeNode"
+    ]
+  },
+  "/r2b/buffer/image": {
+    "publishers": [
+      "/r2b/PrepResizeNode"
+    ],
+    "subscribers": [
+      "/r2b/PlaybackNode"
+    ]
+  },
+  "/r2b/buffer/camera_info": {
+    "publishers": [
+      "/r2b/PrepResizeNode"
+    ],
+    "subscribers": [
+      "/r2b/PlaybackNode"
+    ]
+  },
+  "/r2b/image": {
+    "publishers": [
+      "/r2b/PlaybackNode"
+    ],
+    "subscribers": [
+      "/r2b/AprilTagNode"
+    ]
+  },
+  "/r2b/camera_info": {
+    "publishers": [
+      "/r2b/PlaybackNode"
+    ],
+    "subscribers": [
+      "/r2b/AprilTagNode"
+    ]
+  },
+  "/r2b/apriltag_detections": {
+    "publishers": [
+      "/r2b/AprilTagNode"
+    ],
+    "subscribers": [
+      "/r2b/MonitorNode"
+    ]
+  },
+  "/tf": {
+    "publishers": [
+      "/r2b/AprilTagNode"
+    ],
+    "subscribers": [
+      "/benchmark_transform_listener"
+    ]
+  }
+}
