@@ -181,7 +181,7 @@ def run():
     parser.add_argument("folder", type=Path)
     parser.add_argument("rate", type=float)
     parser.add_argument("count", type=int)
-    parser.add_argument("fixture", nargs="?", type=Path, default=ROOT / "fixture")
+    parser.add_argument("fixture", nargs="?", type=Path, default=ROOT.parent / "fixture")
     parser.add_argument("--no-transform-listener", action="store_true")
     args = parser.parse_args()
     folder, rate, count = args.folder, args.rate, args.count

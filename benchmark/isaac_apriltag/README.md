@@ -31,12 +31,12 @@ From the checkout root inside the container, run the paired test at 193 fps in a
 
 ```bash
 trial=$(mktemp -d /trial/apriltag.XXXXXX)
-cp benchmark/isaac_apriltag/*.{py,cpp,hpp,sh} "$trial/"
+cp -R benchmark/isaac_apriltag/{matched.sh,raio,isaac_ros,analysis} "$trial/"
 cd "$trial"
 export ROS_DISTRO=lyrical OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
-bash build-native.sh
+bash raio/build-native.sh
 bash matched.sh 193
-python3 report.py 193
+python3 analysis/report.py 193
 ```
 
 `summary.json` contains the validated counts and timings. The trial also keeps the reference frames and raw timestamps. Each launch measures three five-second playbacks per runtime. Run a second fresh trial to match the six playbacks in the results table. Replace `193` in both commands to test the other Orin rates (30, 120, 180, 191, or 240 fps).
@@ -63,21 +63,19 @@ For the earlier Isaac ROS 4.6 run, use `ros:jazzy-ros-base` with NVIDIA Docker o
 
 ```bash
 trial=$(mktemp -d)
-cp benchmark/isaac_apriltag/*.{py,cpp,hpp,sh} "$trial/"
+cp -R benchmark/isaac_apriltag/{matched.sh,raio,isaac_ros,analysis} "$trial/"
 docker run --rm -it --gpus device=0 --shm-size=2g -v "$trial:/trial" -w /trial ros:jazzy-ros-base bash
 ```
 
-Inside that container, run `bash provision.sh`, install `libeigen3-dev`, and prepare the recording and Raio package using the shared commands above. Set `ROS_DISTRO=jazzy`, then build and run the paired test at the five A40 rates.
+Inside that container, run `bash isaac_ros/provision.sh`, install `libeigen3-dev`, and prepare the recording and Raio package using the shared commands above. Set `ROS_DISTRO=jazzy`, then build and run the paired test at the five A40 rates.
 
 ## File guide
 
-| Files | Role |
+| Path | Role |
 | --- | --- |
-| [`matched.sh`](matched.sh), [`build-native.sh`](build-native.sh) | Run the comparison at one input rate and build Raio's detector library. |
-| [`native.py`](native.py), [`native_detector.cpp`](native_detector.cpp), [`orin_slabs.hpp`](orin_slabs.hpp) | Python replay and Raio nodes, a C++ wrapper around cuAprilTags, and CUDA memory sharing on Orin. |
-| [`stock-run.sh`](stock-run.sh), [`record_timings.py`](record_timings.py), [`publication.cpp`](publication.cpp) | Launch the packaged Isaac ROS node graph and record its publication and receipt timestamps. |
-| [`capture.py`](capture.py), [`observe_tf.py`](observe_tf.py) | Save the ten reference frames and record tag poses, respectively. |
-| [`report.py`](report.py), [`compare.py`](compare.py), [`collect_blocks.py`](collect_blocks.py), [`plot_delivery.py`](plot_delivery.py) | Validate detections and poses, export results from multiple runs, and draw the delivery chart. |
-| [`draw_raio_graph.py`](draw_raio_graph.py) | Export the Raio node diagram with `python3 draw_raio_graph.py apriltag-raio.svg`. |
+| [`matched.sh`](matched.sh) | Runs one paired trial at the requested input rate. |
+| [`raio/`](raio/) | Python playback and detector nodes, the C++ cuAprilTags wrapper, and Orin GPU memory sharing. Build with `bash raio/build-native.sh`. Generate the node diagram with `python3 raio/draw_raio_graph.py apriltag-raio.svg`. |
+| [`isaac_ros/`](isaac_ros/) | Launches and instruments NVIDIA's benchmark, captures the reference frames, and listens for tag poses. |
+| [`analysis/`](analysis/) | Validates detections and poses, reports latency, combines trial data, and draws the delivery chart. |
 
 The [results directory](../results/isaac_apriltag/README.md) contains the saved measurements, timing and validation details, and the Isaac ROS graph snapshot.

@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd "$(dirname "$0")"
+script_dir=$(cd "$(dirname "$0")" && pwd)
 distro=${ROS_DISTRO:-jazzy}
 source "/opt/ros/$distro/setup.bash"
 arch=$(gcc -print-multiarch)
@@ -18,7 +18,7 @@ mkdir -p "$ROS2_BENCHMARK_OVERRIDE_LOG_FOLDER"
 script=$(find "/opt/ros/$distro" -path '*/isaac_ros_apriltag_benchmark/scripts/isaac_ros_apriltag_node.py' -print -quit)
 test -n "$script"
 sha256sum "$script"
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+export PYTHONPATH="$script_dir:${PYTHONPATH:-}"
 instrumented="$ROS2_BENCHMARK_OVERRIDE_LOG_FOLDER/stock_with_trace.py"
 cp "$script" "$instrumented"
 cat >> "$instrumented" <<'PYTHON'
@@ -28,7 +28,7 @@ configure(TestIsaacROSAprilTagNode)
 PYTHON
 if [[ "$distro" == lyrical && -z ${IMAGE_PUBLICATIONS:-} ]]; then
     probe="$ROS2_BENCHMARK_OVERRIDE_LOG_FOLDER/publication.so"
-    g++ -std=c++17 -O2 -fPIC -shared publication.cpp -ldl -o "$probe"
+    g++ -std=c++17 -O2 -fPIC -shared "$script_dir/publication.cpp" -ldl -o "$probe"
     export IMAGE_PUBLICATIONS="$ROS2_BENCHMARK_OVERRIDE_LOG_FOLDER/publications.csv"
     export LD_PRELOAD="$probe${LD_PRELOAD:+:$LD_PRELOAD}"
 fi

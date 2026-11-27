@@ -38,8 +38,8 @@ NVIDIA reports 191.0 detections/s at 193.0 input fps on its AGX Orin. Raio’s s
 The two high-rate sets (180/240 fps and 191/193 fps) each ran in reverse order on the second launch. To regenerate the table inputs and chart from two launch directories, run the following from `benchmark/isaac_apriltag/` with NumPy and Matplotlib installed.
 
 ```sh
-python3 collect_blocks.py --launch first /trial/first --launch second /trial/second orin-51-blocks.csv
-python3 plot_delivery.py orin-51-blocks.csv orin-51-delivery.png
+python3 analysis/collect_blocks.py --launch first /trial/first --launch second /trial/second orin-51-blocks.csv
+python3 analysis/plot_delivery.py orin-51-blocks.csv orin-51-delivery.png
 ```
 
 ## A40 replay results with Isaac ROS 4.6
@@ -86,7 +86,7 @@ Each detector computes the pose once. The native node unconditionally sets its `
 
 The stock graph keeps its normal detection monitor. A separate ROS process listens on `/tf` during fixture collection and all timing blocks. The native graph has a separate transform monitor. The report checks both transform streams against the stock reference poses and camera frame names and reports their delivery counts separately from detection latency. This measures publication and delivery. There is no transform-tree query in the benchmark.
 
-To exercise the native graph with an unwired transform port, append `--no-transform-listener` to the `native.py` invocation with a fresh output directory. The detector still sets both ports. The paired comparison uses a listener on each side.
+To exercise the native graph with an unwired transform port, append `--no-transform-listener` to the `raio/native.py` invocation with a fresh output directory. The detector still sets both ports. The paired comparison uses a listener on each side.
 
 ## NVIDIA benchmark source
 

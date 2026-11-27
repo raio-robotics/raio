@@ -134,7 +134,7 @@ def analyze_rate(root, rate):
 
 
 if __name__ == "__main__":
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parents[1]
     rates = [int(r) for r in sys.argv[1:]]
     data = {r: analyze_rate(root, r) for r in rates}
     (root / "summary.json").write_text(json.dumps(data, indent=2) + "\n")
