@@ -18,6 +18,6 @@ RUN pip install /raio-src/python
 
 WORKDIR /benchmark
 
-COPY benchmark/benchmarks/ ./benchmarks/
+COPY benchmark/array_latency/ ./array_latency/
 
-CMD ["bash", "-c", "source /opt/ros/humble/setup.bash && cd benchmarks && python3 run_benchmarks.py"]
+CMD ["bash", "-c", "source /opt/ros/humble/setup.bash && cd array_latency && python3 run_benchmarks.py"]

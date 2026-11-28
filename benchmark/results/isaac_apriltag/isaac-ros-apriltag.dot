@@ -1,0 +1,30 @@
+digraph AprilTagReplay {
+  graph [bgcolor="white", pad=0.18, nodesep=0.36, ranksep=0.56, fontname="Helvetica",
+         fontsize=14, labelloc=t, labeljust=l];
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=13,
+        color="#92aac0", fillcolor="#eaf3fb", fontcolor="#172d41", margin="0.13,0.10"];
+  edge [fontname="Helvetica", fontsize=11, fontcolor="#293e50", color="#507899", arrowsize=0.7];
+
+  subgraph cluster_benchmark {
+    label="NVIDIA benchmark container";
+    style=rounded;
+    color="#a8b7c4";
+    fontcolor="#293e50";
+    margin=17;
+
+    loader [label="DataLoaderNode", fillcolor="#f5f6f8"];
+    resize [label="PrepResizeNode", fillcolor="#f5f6f8"];
+    playback [label="PlaybackNode"];
+    april [label="AprilTagNode"];
+    monitor [label="MonitorNode"];
+
+    { rank=same; loader; resize; }
+    { rank=same; playback; april; monitor; }
+    loader -> resize [label="data_loader/image\ndata_loader/camera_info", style=dashed];
+    resize -> playback [label="buffer/image\nbuffer/camera_info", style=dashed];
+    playback -> april [label="image\ncamera_info", minlen=2];
+    april -> monitor [label="apriltag_detections", minlen=2];
+  }
+  tf [label="benchmark_transform_listener", color="#ae926d", fillcolor="#faf1e5"];
+  april -> tf [label="/tf"];
+}
