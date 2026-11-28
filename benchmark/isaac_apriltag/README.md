@@ -1,12 +1,12 @@
 # AprilTag benchmark
 
-Replay the same ten 1280 × 720 frames and camera calibration through the native Raio and Isaac ROS AprilTag pipelines. Both use NVIDIA's cuAprilTags detector. The paired benchmark measures detection latency and counts delivery on both the detection and pose outputs. [Orin and A40 results, stock reports, and measurement method](../results/isaac_apriltag/README.md)
+Replay the same ten 1280 × 720 frames and camera calibration through the native Raio and Isaac ROS AprilTag pipelines. Both use NVIDIA's cuAprilTags detector. The paired benchmark measures detection latency and counts delivery on both the detection and pose outputs. [Jetson Orin and NVIDIA OVX A40 results, stock reports, and measurement method](../results/isaac_apriltag/README.md)
 
 ## Reproduction
 
 ### Run on Jetson AGX Orin
 
-The reported run used a 64 GB AGX Orin Developer Kit, JetPack 7.2.2 in MAXN mode, Isaac ROS 5.1 on ROS 2 Lyrical, and Raio 0.2.0. Use a GPU-enabled JetPack container with CUDA exposed at `/usr/local/cuda`, a writable `/trial`, and the checkout accessible inside the container. Configure the Isaac ROS 5.1 and Lyrical package repositories and install these dependencies. [NVIDIA setup](https://nvidia-isaac-ros.github.io/getting_started/index.html)
+The reported run used a 64 GB Jetson AGX Orin Developer Kit, JetPack 7.2.2 in MAXN mode, Isaac ROS 5.1 on ROS 2 Lyrical, and Raio 0.2.0. Use a GPU-enabled JetPack container with CUDA exposed at `/usr/local/cuda`, a writable `/trial`, and the checkout accessible inside the container. Configure the Isaac ROS 5.1 and Lyrical package repositories and install these dependencies. [NVIDIA setup](https://nvidia-isaac-ros.github.io/getting_started/index.html)
 
 ```sh
 apt-get update
@@ -56,7 +56,7 @@ export ROS2_BENCHMARK_OVERRIDE_PUBLISHER_UPPER_FREQUENCY=191
 launch_test /opt/ros/lyrical/share/isaac_ros_apriltag_benchmark/scripts/isaac_ros_apriltag_node.py
 ```
 
-### Reproduce the A40 runs
+### Reproduce the NVIDIA OVX A40 system runs
 
 For Isaac ROS 5.1, use an Ubuntu 24.04 GPU container with CUDA, the x86-64 Isaac ROS 5.1 and Lyrical repositories, and the same dataset and dependencies above. Run the paired test at 30, 60, 120, 180, and 240 fps.
 
@@ -68,7 +68,7 @@ cp -R benchmark/isaac_apriltag/{matched.sh,raio,isaac_ros,analysis} "$trial/"
 docker run --rm -it --gpus device=0 --shm-size=2g -v "$trial:/trial" -w /trial ros:jazzy-ros-base bash
 ```
 
-Inside that container, run `bash isaac_ros/provision.sh`, install `libeigen3-dev`, and prepare the recording and Raio package using the shared commands above. Set `ROS_DISTRO=jazzy`, then build and run the paired test at the five A40 rates.
+Inside that container, run `bash isaac_ros/provision.sh`, install `libeigen3-dev`, and prepare the recording and Raio package using the shared commands above. Set `ROS_DISTRO=jazzy`, then build and run the paired test at the five OVX A40 rates.
 
 ## File guide
 
